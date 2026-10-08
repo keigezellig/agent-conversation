@@ -1,0 +1,26 @@
+services:
+  agent-bridge:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8080:8080"
+
+  agent-chat:
+    build: .
+    profiles: [agents]
+    env_file: .env
+    environment:
+      AGENT_BRIDGE_URL: http://agent-bridge:8080
+    depends_on:
+      - agent-bridge
+    entrypoint: ["python", "-m", "app.agents"]
+
+  ollama:
+    image: ollama/ollama
+    profiles: [local-model]
+    volumes:
+      - ollama-data:/root/.ollama
+
+volumes:
+  ollama-data:
