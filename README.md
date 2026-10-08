@@ -85,10 +85,45 @@ docker compose --profile agents run --build --rm agent-chat \
   --turns 9
 ```
 
-Repeat `--agent "NAME|MOOD"` for every participant; at least two are required and names must be unique. Change `--subject` to discuss anything. `--turns` limits total replies and must be at least the number of agents so everyone speaks once. The runner prints each reply and exits when the limit is reached. The older `--name-a`/`--mood-a` and `--name-b`/`--mood-b` options remain available for two-agent conversations.
+Repeat `--agent "NAME|MOOD"` for every participant (a mood cannot contain `|`); at least two are required and names must be unique. Change `--subject` to discuss anything. `--turns` limits total replies and must be at least the number of agents so everyone speaks once. The runner prints each reply and exits when the limit is reached.
 
 The runner accepts any OpenAI-compatible chat-completions endpoint. Set `LLM_BASE_URL`, `LLM_MODEL`, and optionally `LLM_API_KEY` in `.env` to use another local server or a hosted provider. It connects to the bridge using `API_TOKEN` and `AGENT_BRIDGE_URL`.
 
+## Read the conversation aloud
+
+With `--read-aloud`, the runner speaks each reply as it is shown, giving every agent its own voice. The next agent composes its reply while the current one is speaking, so there is little silence between replies. Playback is live on the host's speakers through PulseAudio or PipeWire (Linux); there is no recording.
+
+Start the optional local speech engine (Kokoro, CPU-only) and add the `TTS_*` settings from `.env.example` to `.env`:
+
+```bash
+docker compose --profile local-tts up -d kokoro
+```
+
+Then run the conversation with the `agent-chat-voice` service, which mounts your audio socket (`$XDG_RUNTIME_DIR/pulse/native`) and passes `--read-aloud`:
+
+```bash
+docker compose --profile agents run --build --rm agent-chat-voice \
+  --subject "Whether cities should ban private cars" \
+  --agent "Mira|curious and optimistic|af_heart" \
+  --agent "Sol|practical and skeptical|am_michael" \
+  --agent "Dave|quiet observer who occasionally offers a wry remark" \
+  --turns 9
+```
+
+The optional third part of `--agent` picks that agent's voice. Agents without one get the next unused voice from `TTS_VOICES`; if there are more agents than voices, voices repeat and the runner prints a warning. Voice names depend on the speech engine.
+
+Before the conversation starts, the runner checks every voice with the speech engine and checks that it can reach the audio server, and exits with an error if either fails. If speaking a single reply fails later, that reply is printed followed by `[not spoken: REASON]` and the conversation continues. Agents are told their replies are spoken, and markdown, emoji, and an agent's own name prefix are removed from the spoken audio; the printed text is unchanged.
+
+`TTS_BASE_URL`, `TTS_MODEL`, and optionally `TTS_API_KEY` accept any OpenAI-compatible `/v1/audio/speech` endpoint, such as another local server or a hosted provider. The endpoint must support the `wav` response format.
+
+## Develop
+
+Run the tests in Docker:
+
+```bash
+docker build --target test -t agent-bridge-test . && docker run --rm agent-bridge-test
+```
+
 ## Deployment notes
 
-Conversation state and queued messages are held in memory. Run one bridge process; restarting it drops active conversations and queued messages. Use HTTPS/WSS and keep `API_TOKEN` private when agents connect across a network. There is no telephony, speech, or model-provider dependency.
+Conversation state and queued messages are held in memory. Run one bridge process; restarting it drops active conversations and queued messages. Use HTTPS/WSS and keep `API_TOKEN` private when agents connect across a network. The bridge has no telephony, speech, or model-provider dependency; read-aloud lives only in the runner.

@@ -1,13 +1,17 @@
 services:
   agent-bridge:
-    build: .
+    build:
+      context: .
+      target: bridge
     restart: unless-stopped
     env_file: .env
     ports:
       - "8080:8080"
 
   agent-chat:
-    build: .
+    build:
+      context: .
+      target: bridge
     profiles: [agents]
     env_file: .env
     environment:
@@ -16,11 +20,31 @@ services:
       - agent-bridge
     entrypoint: ["python", "-m", "app.agents"]
 
+  agent-chat-voice:
+    build:
+      context: .
+      target: runner-voice
+    profiles: [agents]
+    env_file: .env
+    environment:
+      AGENT_BRIDGE_URL: http://agent-bridge:8080
+      PULSE_SERVER: unix:/run/pulse/native
+      HOME: /tmp
+    volumes:
+      - ${XDG_RUNTIME_DIR:-/run/user/1000}/pulse/native:/run/pulse/native
+    depends_on:
+      - agent-bridge
+    entrypoint: ["python", "-m", "app.agents", "--read-aloud"]
+
   ollama:
     image: ollama/ollama
     profiles: [local-model]
     volumes:
       - ollama-data:/root/.ollama
+
+  kokoro:
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:latest
+    profiles: [local-tts]
 
 volumes:
   ollama-data:
