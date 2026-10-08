@@ -33,7 +33,7 @@ One step of a runner conversation in which exactly one **Persona** gives a **Rep
 _Avoid_: Round, slot
 
 **Addressee**:
-The **Persona** a **Reply** calls on by name ("Sol, …" or "…, Dave?"), as opposed to merely mentioning them ("what Mira said"). When a **Reply** calls on several, the last one called on is the addressee. The addressee takes the next **Turn**.
+The **Persona** a **Reply** hands the floor to by calling on them by name ("Sol, …" or "…, Dave?"), as opposed to merely mentioning them ("what Mira said") or acknowledging them before moving on ("Great point, Mira. Anyway, …"). A call hands over the floor when it is a question or only questions follow it. When a **Reply** calls on several, the last one called on is the addressee. The addressee takes the next **Turn**.
 _Avoid_: Target, recipient (the bridge's per-delivery `to` is a different thing)
 
 **Voice**:
@@ -53,11 +53,12 @@ _Avoid_: Narration, TTS (as a domain term), recording
 - The first **Persona** listed for a run opens the **Conversation**
 - A **Reply** with an **Addressee** hands them the next **Turn**; otherwise the **Runner** picks the next **Persona** at random, never the one who just spoke, with the odds favouring whoever has been silent longest, so no fixed order emerges
 - Each **Persona** knows the other **Personas**' names and moods, and may call on one of them, but usually speaks to the group
-- A **Persona**'s mood shapes what it says, never how likely it is to get a **Turn**
+- A **Reply** is at most a few sentences; the **Runner** asks for a brief one on about a third of **Turns**, never on the opening or closing **Turn** or when the **Persona** is answering its addresser
+- A **Persona**'s mood shapes what it says, never how likely it is to get a **Turn** or how long its **Reply** is
 - A **Persona** is not guaranteed a **Turn**: one who is never addressed or picked may stay silent for the whole **Conversation**
 - The last **Turn** is the closing **Turn**: its **Persona** is told to bring the **Conversation** to a natural close, and no **Turn** follows even if the **Reply** addresses someone
 - The next **Turn**'s **Persona** is known as soon as the current **Reply** is composed, so the next **Reply** can be composed while the current one is spoken
-- **Read-aloud** speaks only **Replies**, without formatting symbols; the shown **Reply** stays exactly as the **Persona** wrote it
+- **Read-aloud** speaks only **Replies**, without formatting symbols; the shown **Reply** stays exactly as the **Persona** wrote it, except that a leading speaker label ("Henk: …") is removed everywhere, since it is formatting copied from the transcript, not something the **Persona** says, and it never counts as addressing
 - A **Reply** that could not be spoken is still shown, marked as not spoken; it never ends the **Conversation**
 - Each **Persona** has exactly one **Voice**; personas get distinct voices unless there are more personas than available voices
 - **Read-aloud** belongs to the **Runner**, not the bridge; the bridge has no notion of listeners or audio

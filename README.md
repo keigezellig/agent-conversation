@@ -65,7 +65,7 @@ The bridge only transports messages. The agents decide how to interpret them, wh
 
 ## Run an AI group conversation
 
-The included runner creates a group, connects each agent through the bridge, and rotates through them in order. Set the subject and give each agent a name and free-form mood. The default model is local Ollama, so no hosted AI account is required.
+The included runner creates a group, connects each agent through the bridge, and lets them take turns the way a group would. Set the subject and give each agent a name and free-form mood. The default model is local Ollama, so no hosted AI account is required.
 
 Start the optional local model and download a model once:
 
@@ -85,7 +85,9 @@ docker compose --profile agents run --build --rm agent-chat \
   --turns 9
 ```
 
-Repeat `--agent "NAME|MOOD"` for every participant (a mood cannot contain `|`); at least two are required and names must be unique. Change `--subject` to discuss anything. `--turns` limits total replies and must be at least the number of agents so everyone speaks once. The runner prints each reply and exits when the limit is reached.
+Repeat `--agent "NAME|MOOD"` for every participant (a mood cannot contain `|`); at least two are required and names must be unique. Change `--subject` to discuss anything. `--turns` is the total number of replies (at least 2). The runner prints each reply and exits when the limit is reached.
+
+The first agent listed opens. Each agent knows the others' names and moods. When a reply calls on someone by name ("Sol, …" or "…, what do you think, Dave?"), that agent answers next; a name merely mentioned ("what Mira said") or used to acknowledge someone before moving on ("Great point, Mira. Anyway, …") does not count. Otherwise the next speaker is picked at random, never the one who just spoke, with better odds for whoever has been silent longest, so an agent nobody calls on may stay quiet. Pass `--seed N` to make those picks repeatable. The agent taking the last turn is asked to bring the conversation to a close.
 
 The runner accepts any OpenAI-compatible chat-completions endpoint. Set `LLM_BASE_URL`, `LLM_MODEL`, and optionally `LLM_API_KEY` in `.env` to use another local server or a hosted provider. It connects to the bridge using `API_TOKEN` and `AGENT_BRIDGE_URL`.
 

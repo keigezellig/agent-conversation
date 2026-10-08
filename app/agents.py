@@ -5,6 +5,7 @@ import asyncio
 from contextlib import AsyncExitStack
 import json
 import os
+import random
 import sys
 import urllib.error
 import urllib.request
@@ -13,6 +14,7 @@ from urllib.parse import quote
 import websockets
 
 from .speech import DEFAULT_VOICES, PulsePlayer, SpeechEngine, Speaker, assign_voices
+from .turns import addressee, pick_next, without_label
 
 
 def _http_json(url: str, token: str, payload: dict) -> dict:
@@ -72,16 +74,27 @@ async def _send_text(socket, text: str, turn: int) -> None:
     await _receive_type(socket, "accepted")
 
 
-def _system_prompt(name: str, peer: str, mood: str, subject: str, read_aloud: bool = False) -> str:
+def _system_prompt(name: str, mood: str, others: list[tuple[str, str]], subject: str, read_aloud: bool = False,
+                   addressed_by: str | None = None, closing: bool = False, brief: bool = False) -> str:
+    people = ", ".join(f"{other} ({other_mood})" for other, other_mood in others)
     prompt = (
-        f"You are {name}, one of several AI agents having a natural group conversation with {peer}. "
-        f"The subject is: {subject}. Your conversational mood is: {mood}. "
-        "Respond directly to what the group has said, add a useful thought, and ask a question "
-        "when it helps the conversation continue. Keep each reply to a few sentences. "
-        "Do not claim personal experiences or repeat points just to fill space. Use informal language. The conversation will escalate quickly if peers are aggressive."
+        f"You are {name}, one of several AI agents having a natural group conversation. "
+        f"The others are {people}. The subject is: {subject}. Your conversational mood is: {mood}. "
+        "Respond to what the group has said and add a thought of your own. Usually you speak to the whole group; "
+        "if you want one particular person to answer, call on them by name. "
+        "Write only what you say, without a name label in front. "
+        "Do not claim personal experiences or repeat points just to fill space. Use informal language."
     )
+    if brief:
+        prompt += " Keep this reply very short: a few words or one sentence, like a quick reaction."
+    else:
+        prompt += " Keep this reply to two or three sentences."
     if read_aloud:
         prompt += " Your replies are spoken aloud: write plain spoken sentences, no markdown, lists, or emoji."
+    if addressed_by:
+        prompt += f" {addressed_by} just asked you directly; answer them."
+    if closing:
+        prompt += " This is the last reply of the conversation: bring it to a natural close and do not ask anyone anything."
     return prompt
 
 
@@ -111,21 +124,36 @@ def _personas(args: argparse.Namespace) -> list[tuple[str, str, str | None]]:
     return personas
 
 
-async def _take_turns(personas, turns: int, compose, relay, speaker=None, show=print) -> None:
-    """Have personas reply in turn order, showing each reply and reading it aloud when a speaker is given.
+BRIEF_SHARE = 1 / 3
 
+
+async def _take_turns(personas, turns: int, compose, relay, speaker=None, show=print, rng=None) -> None:
+    """Have personas take turns, showing each reply and reading it aloud when a speaker is given.
+
+    The first persona opens. Whoever a reply calls on by name speaks next; otherwise the next persona
+    is picked at random, favouring the longest silent. The last turn closes the conversation.
+    About a third of the other unaddressed turns ask for a brief reply.
     A reply is shown when it starts being spoken. The next reply may be composed while the current
     one is spoken, but composing never runs more than one reply ahead of what has been heard.
     """
+    rng = rng or random.Random()
+    moods = {name: mood for name, mood, _ in personas}
+    names = tuple(moods)
     ready = asyncio.Queue()
     lookahead = asyncio.Semaphore(1)
 
     async def produce() -> None:
+        name, addressed_by, last_turns = names[0], None, {}
         for turn in range(turns):
-            name, mood, _ = personas[turn % len(personas)]
+            mood = moods[name]
+            closing = turn == turns - 1
+            brief = turn > 0 and not closing and not addressed_by and rng.random() < BRIEF_SHARE
             await lookahead.acquire()
-            text = await compose(turn, name, mood)
+            text = without_label(await compose(turn, name, mood, addressed_by, closing, brief), names)
             await relay(turn, name, text)
+            last_turns[name] = turn
+            called_on = addressee(text, name, names)
+            next_name = called_on or pick_next(name, names, last_turns, rng)
             audio, problem = None, None
             if speaker:
                 try:
@@ -133,6 +161,7 @@ async def _take_turns(personas, turns: int, compose, relay, speaker=None, show=p
                 except (OSError, RuntimeError) as error:
                     problem = str(error) or type(error).__name__
             await ready.put((name, mood, text, audio, problem))
+            name, addressed_by = next_name, called_on and name
         await ready.put(None)
 
     async def present() -> None:
@@ -170,8 +199,8 @@ async def run_conversation(args: argparse.Namespace) -> str:
     if not token:
         raise RuntimeError("set API_TOKEN or pass --api-token")
     personas = _personas(args)
-    if args.turns < len(personas):
-        raise RuntimeError("--turns must be at least the number of agents so everyone can speak")
+    if args.turns < 2:
+        raise RuntimeError("--turns must be at least 2")
     names = tuple(name for name, _, _ in personas)
     speaker = None
     if args.read_aloud:
@@ -199,8 +228,9 @@ async def run_conversation(args: argparse.Namespace) -> str:
             )
         await asyncio.gather(*(_receive_type(sockets[name], "ready") for name in names))
 
-        async def compose(turn: int, name: str, mood: str) -> str:
-            peers = [peer for peer in names if peer != name]
+        async def compose(turn: int, name: str, mood: str, addressed_by: str | None, closing: bool,
+                          brief: bool) -> str:
+            others = [(other, other_mood) for other, other_mood, _ in personas if other != name]
             history = histories[name]
             if not history:
                 _append_history(
@@ -214,7 +244,7 @@ async def run_conversation(args: argparse.Namespace) -> str:
                 args.llm_api_key,
                 [
                 {"role": "system", "content": _system_prompt(
-                    name, ", ".join(peers), mood, args.subject, args.read_aloud
+                    name, mood, others, args.subject, args.read_aloud, addressed_by, closing, brief
                 )},
                 *history,
                 ],
@@ -232,7 +262,7 @@ async def run_conversation(args: argparse.Namespace) -> str:
                 _append_history(histories[peer], "user", f"{name}: {delivered['payload']['text']}")
 
         await _take_turns(personas, args.turns, compose, relay, speaker,
-                          show=lambda line: print(line, flush=True))
+                          show=lambda line: print(line, flush=True), rng=random.Random(args.seed))
 
     return room["id"]
 
@@ -242,6 +272,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--subject", required=True, help="Any topic for the agents to discuss")
     parser.add_argument("--agent", dest="agent_specs", action="append", help="Agent persona as NAME|MOOD or NAME|MOOD|VOICE; repeat for each agent")
     parser.add_argument("--turns", type=int, default=8, help="Number of replies to generate (default: 8)")
+    parser.add_argument("--seed", type=int, help="Seed for picking who speaks next when nobody is called on")
     parser.add_argument("--bridge-url", default=os.getenv("AGENT_BRIDGE_URL", "http://localhost:8080"))
     parser.add_argument("--api-token", default=os.getenv("API_TOKEN", ""))
     parser.add_argument("--llm-base-url", default=os.getenv("LLM_BASE_URL", "http://localhost:11434/v1"))

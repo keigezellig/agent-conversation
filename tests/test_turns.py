@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from app.agents import _personas, _take_turns
+from app.agents import _personas, _system_prompt, _take_turns, run_conversation
 
 PERSONAS = [("Mira", "curious", None), ("Sol", "skeptical", None)]
 
@@ -42,15 +42,18 @@ class Recorder:
         self.failing_playback = failing_playback
         self.finished = 0
         self.playing = False
+        self.scripted = {}
 
     def log(self, *event):
         with self.lock:
             self.events.append(event)
 
-    async def compose(self, turn, name, mood):
+    async def compose(self, turn, name, mood, addressed_by=None, closing=False, brief=False):
         self.log("compose", turn + 1, self.finished)
+        self.log("turn", name, addressed_by, closing)
+        self.log("brief", brief)
         await asyncio.sleep(0)
-        return f"reply {turn + 1}"
+        return self.scripted.get(turn + 1, f"reply {turn + 1}")
 
     async def relay(self, turn, name, text):
         self.log("relay", turn + 1)
@@ -74,11 +77,15 @@ class Recorder:
         self.log("show", line)
 
 
-def _run(recorder, turns, speaker=True):
+def _run(recorder, turns, speaker=True, personas=PERSONAS, rng=None):
     asyncio.run(_take_turns(
-        PERSONAS, turns, recorder.compose, recorder.relay,
-        recorder if speaker else None, show=recorder.show,
+        personas, turns, recorder.compose, recorder.relay,
+        recorder if speaker else None, show=recorder.show, rng=rng,
     ))
+
+
+def _turns(recorder):
+    return [event[1:] for event in recorder.events if event[0] == "turn"]
 
 
 def test_replies_are_spoken_in_turn_order_and_shown_as_they_start():
@@ -137,8 +144,104 @@ def test_without_a_speaker_replies_are_only_shown():
 def test_compose_failure_ends_the_conversation():
     recorder = Recorder()
 
-    async def broken_compose(turn, name, mood):
+    async def broken_compose(turn, name, mood, addressed_by=None, closing=False, brief=False):
         raise RuntimeError("model endpoint returned an empty response")
 
     with pytest.raises(RuntimeError, match="empty response"):
         asyncio.run(_take_turns(PERSONAS, 3, broken_compose, recorder.relay, recorder, show=recorder.show))
+
+
+TRIO = [("Mira", "curious", None), ("Sol", "skeptical", None), ("Dave", "quiet", None)]
+
+
+class FirstChoice:
+    def __init__(self, roll=0.9):
+        self.roll = roll
+
+    def choices(self, population, weights):
+        return [population[0]]
+
+    def random(self):
+        return self.roll
+
+
+def test_the_first_listed_persona_opens_and_an_addressee_speaks_next():
+    recorder = Recorder(play_seconds=0)
+    recorder.scripted = {1: "Cars are loud. Dave, what do you think?", 2: "Hmm. Mira, maybe."}
+    _run(recorder, 4, speaker=False, personas=TRIO, rng=FirstChoice())
+    assert _turns(recorder) == [
+        ("Mira", None, False),
+        ("Dave", "Mira", False),
+        ("Mira", "Dave", False),
+        ("Sol", None, True),
+    ]
+
+
+def test_a_leading_speaker_label_is_removed_before_showing_relaying_and_addressing():
+    recorder = Recorder(play_seconds=0)
+    recorder.scripted = {1: "Dave: Are you serious, Sol?"}
+    relayed = []
+
+    async def relay(turn, name, text):
+        relayed.append(text)
+
+    asyncio.run(_take_turns(TRIO, 2, recorder.compose, relay, show=recorder.show))
+    assert relayed[0] == "Are you serious, Sol?"
+    assert ("show", "Mira (curious): Are you serious, Sol?") in recorder.events
+    assert _turns(recorder)[1][0] == "Sol"
+
+
+def test_without_an_addressee_the_last_speaker_never_goes_twice():
+    recorder = Recorder(play_seconds=0)
+    _run(recorder, 6, speaker=False, personas=TRIO)
+    speakers = [name for name, _, _ in _turns(recorder)]
+    assert speakers[0] == "Mira"
+    assert all(a != b for a, b in zip(speakers, speakers[1:]))
+
+
+def test_only_the_last_turn_is_the_closing_turn():
+    recorder = Recorder(play_seconds=0)
+    _run(recorder, 3, speaker=False)
+    assert [closing for _, _, closing in _turns(recorder)] == [False, False, True]
+
+
+def test_system_prompt_introduces_the_others_and_drops_the_escalation_line():
+    prompt = _system_prompt("Mira", "curious", [("Sol", "skeptical"), ("Dave", "quiet")], "cars")
+    assert "Sol (skeptical)" in prompt and "Dave (quiet)" in prompt
+    assert "by name" in prompt
+    assert "escalate" not in prompt
+    assert "name label" in prompt
+
+
+def test_system_prompt_marks_a_direct_question_and_the_closing_turn():
+    others = [("Sol", "skeptical")]
+    assert "Sol just asked you directly" in _system_prompt("Mira", "curious", others, "cars", addressed_by="Sol")
+    assert "last reply" in _system_prompt("Mira", "curious", others, "cars", closing=True)
+    plain = _system_prompt("Mira", "curious", others, "cars")
+    assert "asked you directly" not in plain and "last reply" not in plain
+
+
+def _conversation_args(turns):
+    return argparse.Namespace(api_token="secret", agent_specs=["Mira|curious", "Sol|skeptical", "Dave|quiet"],
+                              turns=turns, read_aloud=False)
+
+
+def test_at_least_two_turns_are_required():
+    with pytest.raises(RuntimeError, match="at least 2"):
+        asyncio.run(run_conversation(_conversation_args(1)))
+
+
+def test_unaddressed_middle_turns_may_be_brief_but_the_opening_answers_and_closing_never_are():
+    recorder = Recorder(play_seconds=0)
+    recorder.scripted = {1: "Dave, thoughts?"}
+    _run(recorder, 4, speaker=False, personas=TRIO, rng=FirstChoice(roll=0.0))
+    briefs = [event[1] for event in recorder.events if event[0] == "brief"]
+    # Opening, Dave answering a question, a free middle turn, the closing turn.
+    assert briefs == [False, False, True, False]
+
+
+def test_system_prompt_asks_for_the_chosen_length():
+    others = [("Sol", "skeptical")]
+    assert "very short" in _system_prompt("Mira", "curious", others, "cars", brief=True)
+    normal = _system_prompt("Mira", "curious", others, "cars")
+    assert "two or three sentences" in normal and "very short" not in normal
