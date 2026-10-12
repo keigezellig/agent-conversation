@@ -89,7 +89,65 @@ Repeat `--agent "NAME|MOOD"` for every participant (a mood cannot contain `|`); 
 
 The first agent listed opens. Each agent knows the others' names and moods. When a reply calls on someone by name ("Sol, …" or "…, what do you think, Dave?"), that agent answers next; a name merely mentioned ("what Mira said") or used to acknowledge someone before moving on ("Great point, Mira. Anyway, …") does not count. Otherwise the next speaker is picked at random, never the one who just spoke, with better odds for whoever has been silent longest, so an agent nobody calls on may stay quiet. Pass `--seed N` to make those picks repeatable. The agent taking the last turn is asked to bring the conversation to a close.
 
-The runner accepts any OpenAI-compatible chat-completions endpoint. Set `LLM_BASE_URL`, `LLM_MODEL`, and optionally `LLM_API_KEY` in `.env` to use another local server or a hosted provider. It connects to the bridge using `API_TOKEN` and `AGENT_BRIDGE_URL`.
+### Model providers
+
+The runner speaks two model APIs, chosen with `LLM_API` (or `--llm-api`):
+
+| `LLM_API` | Endpoint | Default `LLM_BASE_URL` | Default `LLM_MODEL` | Key |
+|---|---|---|---|---|
+| `openai` (default) | `POST /chat/completions` | `http://localhost:11434/v1` | `llama3.2` | `LLM_API_KEY` as a bearer token, optional |
+| `claude` | `POST /messages` | `https://api.anthropic.com/v1` | `claude-sonnet-5` | `LLM_API_KEY` or `ANTHROPIC_API_KEY`, required |
+
+Either way, set `LLM_BASE_URL`, `LLM_MODEL`, and optionally `LLM_API_KEY` to point at another local server or a hosted provider; leave one empty to take the chosen API's default. `LLM_MAX_TOKENS` (default 1024) caps a reply — the Claude API requires a limit, and chat completions ignore it. The runner connects to the bridge using `API_TOKEN` and `AGENT_BRIDGE_URL`.
+
+#### Running the personas on the Claude API
+
+Set these four lines in `.env` (the `agent-chat` service reads it):
+
+```bash
+LLM_API=claude
+LLM_BASE_URL=
+LLM_MODEL=
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+Leaving `LLM_BASE_URL` and `LLM_MODEL` empty falls back to `https://api.anthropic.com/v1` and `claude-sonnet-5`. Fill them in to choose something else, such as `LLM_MODEL=claude-opus-5` or a gateway of your own. No local model is needed, so you can skip the Ollama steps above.
+
+Three things to get right, because none of them fails in an obvious way:
+
+- `LLM_API=claude` is what selects the Claude API. Pointing `LLM_BASE_URL` at Anthropic is not enough on its own: left as `openai`, the runner would send a chat-completions request with a bearer token and get a confusing error back.
+- `LLM_BASE_URL` is a base, not the endpoint. Use `https://api.anthropic.com/v1`; the runner appends `/messages` itself, so a URL ending in `/messages` becomes `/v1/messages/messages` and 404s.
+- `LLM_MODEL` must be a current model ID, such as `claude-sonnet-5`, `claude-opus-5`, or `claude-haiku-4-5-20251001`. An invented or retired ID is rejected by the API, not by the runner.
+
+Then start a conversation the same way as before — nothing on the command line changes:
+
+```bash
+docker compose --profile agents run --build --rm agent-chat \
+  --subject "Whether cities should ban private cars" \
+  --agent "Mira|curious and optimistic" \
+  --agent "Sol|practical and skeptical" \
+  --agent "Dave|quiet observer who occasionally offers a wry remark" \
+  --turns 9
+```
+
+For a one-off run without editing `.env`, export the key once and pass the settings as flags. Naming `-e ANTHROPIC_API_KEY` without a value forwards it from your shell, so the key itself stays out of the command:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+
+docker compose --profile agents run --build --rm -e ANTHROPIC_API_KEY agent-chat \
+  --llm-api claude \
+  --llm-base-url https://api.anthropic.com/v1 \
+  --model claude-sonnet-5 \
+  --subject "Whether cities should ban private cars" \
+  --agent "Mira|curious and optimistic" \
+  --agent "Sol|practical and skeptical" \
+  --turns 9
+```
+
+Each turn is one request, so `--turns 9` makes nine calls regardless of how many personas there are. The runner checks the key before it creates the conversation, so a missing or wrong one fails immediately rather than part-way through. Read-aloud works the same with either provider: Claude writes the replies and the local speech engine voices them.
+
+Only the persona replies go to the model provider; the bridge itself never talks to one.
 
 ## Read the conversation aloud
 

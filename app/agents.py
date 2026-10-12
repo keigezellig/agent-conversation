@@ -35,26 +35,67 @@ def _create_conversation(base_url: str, token: str, names: tuple[str, ...]) -> d
     )
 
 
-def _complete(base_url: str, model: str, api_key: str, messages: list[dict]) -> str:
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    request = urllib.request.Request(
-        f"{base_url.rstrip('/')}/chat/completions",
-        data=json.dumps({"model": model, "messages": messages}).encode(),
-        headers=headers,
-    )
+# Which API a model endpoint speaks, and where each one lives by default.
+ANTHROPIC_VERSION = "2023-06-01"
+API_DEFAULTS = {
+    "openai": {"base_url": "http://localhost:11434/v1", "model": "llama3.2"},
+    "claude": {"base_url": "https://api.anthropic.com/v1", "model": "claude-sonnet-5"},
+}
+NO_CLAUDE_KEY = "set ANTHROPIC_API_KEY or pass --llm-api-key to use the Claude API"
+
+
+def _post_model(url: str, headers: dict, payload: dict) -> dict:
+    request = urllib.request.Request(url, data=json.dumps(payload).encode(), headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=120) as response:
-            result = json.load(response)
+            return json.load(response)
     except urllib.error.HTTPError as error:
         detail = error.read().decode(errors="replace")
         raise RuntimeError(f"model endpoint returned HTTP {error.code}: {detail}") from error
 
+
+def _chat_completion(base_url: str, model: str, api_key: str, system: str, history: list[dict]):
+    """Ask for a reply through the OpenAI chat-completions API, which takes the system prompt as a message."""
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    result = _post_model(
+        f"{base_url.rstrip('/')}/chat/completions",
+        headers,
+        {"model": model, "messages": [{"role": "system", "content": system}, *history]},
+    )
     try:
-        content = result["choices"][0]["message"]["content"]
+        return result["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as error:
         raise RuntimeError("model endpoint returned an invalid chat completion") from error
+
+
+def _claude_message(base_url: str, model: str, api_key: str, system: str, history: list[dict],
+                    max_tokens: int):
+    """Ask for a reply through the Claude API, which takes the system prompt beside the messages."""
+    if not api_key:
+        raise RuntimeError(NO_CLAUDE_KEY)
+    result = _post_model(
+        f"{base_url.rstrip('/')}/messages",
+        {
+            "Content-Type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": ANTHROPIC_VERSION,
+        },
+        {"model": model, "max_tokens": max_tokens, "system": system, "messages": history},
+    )
+    try:
+        return "".join(block["text"] for block in result["content"] if block.get("type") == "text")
+    except (KeyError, TypeError) as error:
+        raise RuntimeError("model endpoint returned an invalid message") from error
+
+
+def _complete(api: str, base_url: str, model: str, api_key: str, system: str, history: list[dict],
+              max_tokens: int) -> str:
+    if api == "claude":
+        content = _claude_message(base_url, model, api_key, system, history, max_tokens)
+    else:
+        content = _chat_completion(base_url, model, api_key, system, history)
     if not isinstance(content, str) or not content.strip():
         raise RuntimeError("model endpoint returned an empty response")
     return content.strip()
@@ -209,6 +250,10 @@ async def run_conversation(args: argparse.Namespace) -> str:
     personas = _personas(args)
     if args.turns < 2:
         raise RuntimeError("--turns must be at least 2")
+    if args.llm_api == "claude" and not args.llm_api_key:
+        raise RuntimeError(NO_CLAUDE_KEY)
+    if args.llm_max_tokens < 1:
+        raise RuntimeError("--llm-max-tokens must be at least 1")
     names = tuple(name for name, _, _ in personas)
     speaker = None
     if args.read_aloud:
@@ -251,15 +296,15 @@ async def run_conversation(args: argparse.Namespace) -> str:
                     f"Start a conversation about {args.subject}. Open with a thought or question.",
                 )
             response = await asyncio.to_thread(_complete,
+                args.llm_api,
                 args.llm_base_url,
                 args.model,
                 args.llm_api_key,
-                [
-                {"role": "system", "content": _system_prompt(
+                _system_prompt(
                     name, mood, others, args.subject, args.read_aloud, addressed_by, closing, brief
-                )},
-                *history,
-                ],
+                ),
+                list(history),
+                args.llm_max_tokens,
             )
             _append_history(history, "assistant", response)
             return response
@@ -287,9 +332,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, help="Seed for picking who speaks next when nobody is called on")
     parser.add_argument("--bridge-url", default=os.getenv("AGENT_BRIDGE_URL", "http://localhost:8080"))
     parser.add_argument("--api-token", default=os.getenv("API_TOKEN", ""))
-    parser.add_argument("--llm-base-url", default=os.getenv("LLM_BASE_URL", "http://localhost:11434/v1"))
-    parser.add_argument("--model", default=os.getenv("LLM_MODEL", "llama3.2"))
-    parser.add_argument("--llm-api-key", default=os.getenv("LLM_API_KEY", ""))
+    parser.add_argument("--llm-api", choices=tuple(API_DEFAULTS), default=os.getenv("LLM_API") or "openai",
+                        help="Which API the model endpoint speaks (default: openai)")
+    parser.add_argument("--llm-base-url", default=os.getenv("LLM_BASE_URL"),
+                        help="Default: local Ollama, or the Claude API with --llm-api claude")
+    parser.add_argument("--model", default=os.getenv("LLM_MODEL"),
+                        help="Default: llama3.2, or claude-sonnet-5 with --llm-api claude")
+    parser.add_argument("--llm-api-key", default=os.getenv("LLM_API_KEY") or os.getenv("ANTHROPIC_API_KEY", ""))
+    parser.add_argument("--llm-max-tokens", type=int, default=int(os.getenv("LLM_MAX_TOKENS") or 1024),
+                        help="Most tokens a reply may use; the Claude API requires a limit (default: 1024)")
     parser.add_argument("--read-aloud", action="store_true", help="Speak each reply aloud as it is shown")
     parser.add_argument("--tts-base-url", default=os.getenv("TTS_BASE_URL", "http://localhost:8880/v1"))
     parser.add_argument("--tts-model", default=os.getenv("TTS_MODEL", "kokoro"))
@@ -300,7 +351,11 @@ def parse_args() -> argparse.Namespace:
                         help="How quickly the voices speak, 0.25 to 4.0 (default: 1.1)")
     parser.add_argument("--tts-sample-rate", type=int, default=int(os.getenv("TTS_SAMPLE_RATE") or 24000),
                         help="Sample rate in hertz of the speech endpoint's raw audio (default: 24000)")
-    return parser.parse_args()
+    args = parser.parse_args()
+    defaults = API_DEFAULTS[args.llm_api]
+    args.llm_base_url = args.llm_base_url or defaults["base_url"]
+    args.model = args.model or defaults["model"]
+    return args
 
 
 def main() -> None:
