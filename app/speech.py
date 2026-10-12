@@ -1,18 +1,36 @@
 """Read-aloud support: speak persona replies through an OpenAI-compatible speech endpoint."""
 
 import json
+import queue
 import re
 import subprocess
-import tempfile
+import threading
 import urllib.error
 import urllib.request
+from array import array
 
 DEFAULT_VOICES = "af_heart,am_michael,bf_emma,am_fenrir,af_bella,bm_george"
+
+# A reply is spoken in pieces so sound starts on its first sentence instead of its last. Each request
+# carries about a second of fixed overhead, so pieces that are too small are slower, not quicker: only
+# the opening piece is deliberately small.
+MIN_OPENING = 40
+MIN_PIECE = 200
+
+# The engine pads every piece with about 50ms of silence before and 340ms after, which would stack up
+# where two pieces meet. Trim that away and insert a pause of our own instead. A seam always falls on a
+# sentence boundary, so the pause matches the pauses the engine leaves between sentences itself
+# (measured 230-390ms across voices), and a seam sounds like every other sentence break.
+SILENCE = 300
+PAUSE_MS = 280
 
 _LINK = re.compile(r"\[([^\]]+)\]\([^)]*\)")
 _LINE_MARKER = re.compile(r"^[ \t]*(?:#+|[-*+]|\d+[.)])[ \t]+", re.MULTILINE)
 _EMPHASIS = re.compile(r"\*+|`+|~~|(?<!\w)_+|_+(?!\w)")
 _EMOJI = re.compile("[\U0001F000-\U0001FAFF☀-➿️‍]")
+_SPACED_PUNCTUATION = re.compile(r"\s+(?=[.,;:!?…])")
+_ENDS_SENTENCE = re.compile(r"[.!?…][\"'’”)\]]*$")
+_SENTENCE = re.compile(r"[^.!?…]*[.!?…]+[\"'’”)\]]*\s*|[^.!?…]+$")
 
 
 def speakable(text: str, name: str) -> str:
@@ -22,7 +40,13 @@ def speakable(text: str, name: str) -> str:
     text = _LINE_MARKER.sub("", text)
     text = _EMPHASIS.sub("", text)
     text = _EMOJI.sub("", text)
-    return re.sub(r"[ \t]+", " ", text).strip()
+    text = _SPACED_PUNCTUATION.sub("", text)
+    lines = []
+    for line in text.splitlines():
+        line = re.sub(r"[ \t]+", " ", line).strip()
+        if line:
+            lines.append(line if _ENDS_SENTENCE.search(line) else f"{line}.")
+    return " ".join(lines)
 
 
 def assign_voices(personas: list[tuple[str, str, str | None]], available: list[str]) -> dict[str, str]:
@@ -43,13 +67,46 @@ def assign_voices(personas: list[tuple[str, str, str | None]], available: list[s
     return voices
 
 
+def pieces(text: str) -> list[str]:
+    """Split a reply into the pieces it is synthesized in, one sentence or a few.
+
+    The opening piece is kept short so the reply starts being heard sooner; the rest are grouped to
+    stay well clear of the per-request overhead.
+    """
+    sentences = [found.group().strip() for found in _SENTENCE.finditer(text) if found.group().strip()]
+    if not sentences:
+        return []
+
+    grouped = []
+    for sentence in sentences:
+        wanted = MIN_OPENING if len(grouped) == 1 else MIN_PIECE
+        if grouped and len(grouped[-1]) < wanted:
+            grouped[-1] += f" {sentence}"
+        else:
+            grouped.append(sentence)
+    return grouped
+
+
+def trim(audio: bytes, lead: bool, tail: bool) -> bytes:
+    """Return the audio without the near-silent padding the engine adds at the requested ends."""
+    samples = array("h")
+    samples.frombytes(audio[: len(audio) - len(audio) % samples.itemsize])
+    loud = [index for index, sample in enumerate(samples) if abs(sample) > SILENCE]
+    if not loud:
+        return b"" if lead or tail else audio
+    start = loud[0] if lead else 0
+    stop = loud[-1] + 1 if tail else len(samples)
+    return samples[start:stop].tobytes()
+
+
 class SpeechEngine:
     """Client for an OpenAI-compatible text-to-speech endpoint."""
 
-    def __init__(self, base_url: str, model: str, api_key: str):
+    def __init__(self, base_url: str, model: str, api_key: str, speed: float = 1.0):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
+        self.speed = speed
 
     def synthesize(self, text: str, voice: str) -> bytes:
         headers = {"Content-Type": "application/json"}
@@ -61,7 +118,8 @@ class SpeechEngine:
                 "model": self.model,
                 "input": text,
                 "voice": voice,
-                "response_format": "wav",
+                "response_format": "pcm",
+                "speed": self.speed,
             }).encode(),
             headers=headers,
         )
@@ -77,7 +135,10 @@ class SpeechEngine:
 
 
 class PulsePlayer:
-    """Plays WAV audio on the host's PulseAudio or PipeWire server."""
+    """Plays raw audio on the host's PulseAudio or PipeWire server as it arrives."""
+
+    def __init__(self, sample_rate: int = 24000):
+        self.sample_rate = sample_rate
 
     def check(self) -> None:
         try:
@@ -90,13 +151,63 @@ class PulsePlayer:
                 f"({result.stderr.strip() or 'pactl info failed'})"
             )
 
-    def play(self, audio: bytes) -> None:
-        with tempfile.NamedTemporaryFile(suffix=".wav") as file:
-            file.write(audio)
-            file.flush()
-            result = subprocess.run(["paplay", file.name], capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(f"playback failed: {result.stderr.strip() or 'paplay exited with an error'}")
+    def open(self) -> subprocess.Popen:
+        return subprocess.Popen(
+            [
+                "paplay", "--raw",
+                "--format=s16le",
+                f"--rate={self.sample_rate}",
+                "--channels=1",
+            ],
+            stdin=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    def silence(self, milliseconds: int) -> bytes:
+        return bytes(2 * (self.sample_rate * milliseconds // 1000))
+
+    def play(self, audio) -> None:
+        """Play everything the given iterable yields, writing each piece as soon as it is available."""
+        player = self.open()
+        try:
+            for piece in audio:
+                player.stdin.write(piece)
+        except BrokenPipeError:
+            pass
+        finally:
+            try:
+                player.stdin.close()
+            except BrokenPipeError:
+                pass
+            stderr = player.stderr.read().decode(errors="replace")
+            player.stderr.close()
+            player.wait()
+        if player.returncode != 0:
+            raise RuntimeError(f"playback failed: {stderr.strip() or 'paplay exited with an error'}")
+
+
+class Clip:
+    """A reply's audio: its opening piece ready to play, the rest arriving while that one is heard."""
+
+    def __init__(self, opening: bytes, pending: queue.Queue):
+        self.opening = opening
+        self.pending = pending
+        self.failure: Exception | None = None
+
+    def audio(self, pause: bytes = b""):
+        """Yield the pieces in order, trimming the padding at each seam and pausing between them.
+
+        A piece that failed to synthesize ends the clip: what was already synthesized is still spoken,
+        and the failure is raised once it has been.
+        """
+        piece = trim(self.opening, lead=False, tail=True)
+        while (following := self.pending.get()) is not None:
+            yield piece
+            yield pause
+            piece = trim(following, lead=True, tail=True)
+        yield piece
+        if self.failure:
+            raise self.failure
 
 
 class Speaker:
@@ -121,11 +232,28 @@ class Speaker:
                 ) from error
         self.player.check()
 
-    def synthesize(self, name: str, text: str) -> bytes:
-        spoken = speakable(text, name)
+    def open(self, name: str, text: str) -> Clip:
+        """Start synthesizing a reply and return once its opening piece can be played."""
+        spoken = pieces(speakable(text, name))
         if not spoken:
             raise RuntimeError("nothing to speak")
-        return self.engine.synthesize(spoken, self.voices[name])
+        voice = self.voices[name]
+        opening = self.engine.synthesize(spoken[0], voice)
 
-    def play(self, audio: bytes) -> None:
-        self.player.play(audio)
+        pending = queue.Queue(maxsize=len(spoken))
+        clip = Clip(opening, pending)
+
+        def synthesize_rest() -> None:
+            try:
+                for piece in spoken[1:]:
+                    pending.put(self.engine.synthesize(piece, voice))
+            except (OSError, RuntimeError) as error:
+                clip.failure = error
+            finally:
+                pending.put(None)
+
+        threading.Thread(target=synthesize_rest, daemon=True).start()
+        return clip
+
+    def speak(self, clip: Clip) -> None:
+        self.player.play(clip.audio(self.player.silence(PAUSE_MS)))

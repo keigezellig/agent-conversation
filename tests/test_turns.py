@@ -58,18 +58,18 @@ class Recorder:
     async def relay(self, turn, name, text):
         self.log("relay", turn + 1)
 
-    def synthesize(self, name, text):
+    def open(self, name, text):
         if text in self.failing_synthesis:
             raise RuntimeError("TTS timed out")
-        return text.encode()
+        return text
 
-    def play(self, audio):
+    def speak(self, clip):
         assert not self.playing, "replies were spoken over each other"
         self.playing = True
-        self.log("play", audio.decode())
+        self.log("play", clip)
         time.sleep(self.play_seconds)
         self.playing = False
-        if audio.decode() in self.failing_playback:
+        if clip in self.failing_playback:
             raise RuntimeError("playback failed")
         self.finished += 1
 

@@ -95,6 +95,8 @@ The runner accepts any OpenAI-compatible chat-completions endpoint. Set `LLM_BAS
 
 With `--read-aloud`, the runner speaks each reply as it is shown, giving every agent its own voice. The next agent composes its reply while the current one is speaking, so there is little silence between replies. Playback is live on the host's speakers through PulseAudio or PipeWire (Linux); there is no recording.
 
+A reply is spoken in sentence-sized pieces rather than all at once: it starts being heard as soon as its first sentence is ready, while the rest is still being synthesized. On a CPU speech engine this is the difference between a few seconds of silence before each reply and almost none.
+
 Start the optional local speech engine (Kokoro, CPU-only) and add the `TTS_*` settings from `.env.example` to `.env`:
 
 ```bash
@@ -116,7 +118,9 @@ The optional third part of `--agent` picks that agent's voice. Agents without on
 
 Before the conversation starts, the runner checks every voice with the speech engine and checks that it can reach the audio server, and exits with an error if either fails. If speaking a single reply fails later, that reply is printed followed by `[not spoken: REASON]` and the conversation continues. Agents are told their replies are spoken, and markdown, emoji, and an agent's own name prefix are removed from the spoken audio; the printed text is unchanged.
 
-`TTS_BASE_URL`, `TTS_MODEL`, and optionally `TTS_API_KEY` accept any OpenAI-compatible `/v1/audio/speech` endpoint, such as another local server or a hosted provider. The endpoint must support the `wav` response format.
+`TTS_SPEED` (or `--tts-speed`, default 1.1) sets how quickly the voices speak, between 0.25 and 4.0; above 1.0 is also a little quicker to synthesize. `TTS_SAMPLE_RATE` (or `--tts-sample-rate`, default 24000) must match the sample rate of the endpoint's audio.
+
+`TTS_BASE_URL`, `TTS_MODEL`, and optionally `TTS_API_KEY` accept any OpenAI-compatible `/v1/audio/speech` endpoint, such as another local server or a hosted provider. The endpoint must support the `pcm` response format, which both Kokoro and OpenAI return as 24 kHz mono 16-bit audio. The runner sends only standard fields (`model`, `input`, `voice`, `response_format`, `speed`); splitting a reply into pieces and pacing them is the runner's own work, so no engine-specific extensions are required.
 
 ## Develop
 

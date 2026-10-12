@@ -79,18 +79,21 @@ def _system_prompt(name: str, mood: str, others: list[tuple[str, str]], subject:
     people = ", ".join(f"{other} ({other_mood})" for other, other_mood in others)
     prompt = (
         f"You are {name}, one of several AI agents having a natural group conversation. "
-        f"The others are {people}. The subject is: {subject}. Your conversational mood is: {mood}. "
+        f"The others are {people}. The subject is: {subject}. Your personality is: {mood}. "
         "Respond to what the group has said and add a thought of your own. Usually you speak to the whole group; "
         "if you want one particular person to answer, call on them by name. "
         "Write only what you say, without a name label in front. "
-        "Do not claim personal experiences or repeat points just to fill space. Use informal language."
+        "Do not repeat points just to fill space. Use informal and very simple language."
     )
     if brief:
         prompt += " Keep this reply very short: a few words or one sentence, like a quick reaction."
     else:
         prompt += " Keep this reply to two or three sentences."
     if read_aloud:
-        prompt += " Your replies are spoken aloud: write plain spoken sentences, no markdown, lists, or emoji."
+        prompt += (
+            " Your replies are spoken aloud: write plain spoken sentences, no markdown, lists, or emoji. "
+            "Talk the way people actually talk, in contractions and short clauses."
+        )
     if addressed_by:
         prompt += f" {addressed_by} just asked you directly; answer them."
     if closing:
@@ -135,6 +138,7 @@ async def _take_turns(personas, turns: int, compose, relay, speaker=None, show=p
     About a third of the other unaddressed turns ask for a brief reply.
     A reply is shown when it starts being spoken. The next reply may be composed while the current
     one is spoken, but composing never runs more than one reply ahead of what has been heard.
+    A reply starts being spoken as soon as its opening piece is synthesized, not when all of it is.
     """
     rng = rng or random.Random()
     moods = {name: mood for name, mood, _ in personas}
@@ -154,24 +158,24 @@ async def _take_turns(personas, turns: int, compose, relay, speaker=None, show=p
             last_turns[name] = turn
             called_on = addressee(text, name, names)
             next_name = called_on or pick_next(name, names, last_turns, rng)
-            audio, problem = None, None
+            clip, problem = None, None
             if speaker:
                 try:
-                    audio = await asyncio.to_thread(speaker.synthesize, name, text)
+                    clip = await asyncio.to_thread(speaker.open, name, text)
                 except (OSError, RuntimeError) as error:
                     problem = str(error) or type(error).__name__
-            await ready.put((name, mood, text, audio, problem))
+            await ready.put((name, mood, text, clip, problem))
             name, addressed_by = next_name, called_on and name
         await ready.put(None)
 
     async def present() -> None:
         while (reply := await ready.get()) is not None:
-            name, mood, text, audio, problem = reply
+            name, mood, text, clip, problem = reply
             show(f"{name} ({mood}): {text}")
             lookahead.release()
-            if audio is not None:
+            if clip is not None:
                 try:
-                    await asyncio.to_thread(speaker.play, audio)
+                    await asyncio.to_thread(speaker.speak, clip)
                 except (OSError, RuntimeError) as error:
                     problem = str(error) or type(error).__name__
             if problem:
@@ -191,7 +195,11 @@ def _speaker(args: argparse.Namespace, personas: list[tuple[str, str, str | None
     shared = sorted({voice for voice in voices.values() if list(voices.values()).count(voice) > 1})
     if shared:
         print(f"Warning: personas share voices: {', '.join(shared)}", file=sys.stderr, flush=True)
-    return Speaker(SpeechEngine(args.tts_base_url, args.tts_model, args.tts_api_key), PulsePlayer(), voices)
+    return Speaker(
+        SpeechEngine(args.tts_base_url, args.tts_model, args.tts_api_key, args.tts_speed),
+        PulsePlayer(args.tts_sample_rate),
+        voices,
+    )
 
 
 async def run_conversation(args: argparse.Namespace) -> str:
@@ -204,6 +212,10 @@ async def run_conversation(args: argparse.Namespace) -> str:
     names = tuple(name for name, _, _ in personas)
     speaker = None
     if args.read_aloud:
+        if not 0.25 <= args.tts_speed <= 4.0:
+            raise RuntimeError("--tts-speed must be between 0.25 and 4.0")
+        if args.tts_sample_rate < 1:
+            raise RuntimeError("--tts-sample-rate must be a positive number of hertz")
         speaker = _speaker(args, personas)
         await asyncio.to_thread(speaker.check)
 
@@ -284,6 +296,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tts-api-key", default=os.getenv("TTS_API_KEY", ""))
     parser.add_argument("--tts-voices", default=os.getenv("TTS_VOICES") or DEFAULT_VOICES,
                         help="Comma-separated voices for personas without their own")
+    parser.add_argument("--tts-speed", type=float, default=float(os.getenv("TTS_SPEED") or 1.1),
+                        help="How quickly the voices speak, 0.25 to 4.0 (default: 1.1)")
+    parser.add_argument("--tts-sample-rate", type=int, default=int(os.getenv("TTS_SAMPLE_RATE") or 24000),
+                        help="Sample rate in hertz of the speech endpoint's raw audio (default: 24000)")
     return parser.parse_args()
 
 

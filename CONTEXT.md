@@ -58,6 +58,7 @@ _Avoid_: Narration, TTS (as a domain term), recording
 - A **Persona** is not guaranteed a **Turn**: one who is never addressed or picked may stay silent for the whole **Conversation**
 - The last **Turn** is the closing **Turn**: its **Persona** is told to bring the **Conversation** to a natural close, and no **Turn** follows even if the **Reply** addresses someone
 - The next **Turn**'s **Persona** is known as soon as the current **Reply** is composed, so the next **Reply** can be composed while the current one is spoken
+- **Read-aloud** speaks a **Reply** in sentence-sized pieces, each one synthesized while the previous one is heard, so a **Reply** starts being spoken before all of it has been synthesized; the pieces are heard as one continuous **Reply**, with the pause between them chosen by the **Runner** rather than left to the speech engine
 - **Read-aloud** speaks only **Replies**, without formatting symbols; the shown **Reply** stays exactly as the **Persona** wrote it, except that a leading speaker label ("Henk: …") is removed everywhere, since it is formatting copied from the transcript, not something the **Persona** says, and it never counts as addressing
 - A **Reply** that could not be spoken is still shown, marked as not spoken; it never ends the **Conversation**
 - Each **Persona** has exactly one **Voice**; personas get distinct voices unless there are more personas than available voices
