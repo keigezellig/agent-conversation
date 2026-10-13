@@ -3,8 +3,10 @@
 import json
 import queue
 import re
+import struct
 import subprocess
 import threading
+import time
 import urllib.error
 import urllib.request
 from array import array
@@ -23,6 +25,12 @@ MIN_PIECE = 200
 # (measured 230-390ms across voices), and a seam sounds like every other sentence break.
 SILENCE = 300
 PAUSE_MS = 280
+
+# A cloud engine refuses a piece of speech now and then: Microsoft turned down about one request in
+# three while edge-tts was tried, and those refusals came and went with no pattern. Each further try
+# waits longer, so a conversation survives a spell of them instead of losing a reply to every one.
+RETRIES = 4
+RETRY_PAUSE = 2.0
 
 _LINK = re.compile(r"\[([^\]]+)\]\([^)]*\)")
 _LINE_MARKER = re.compile(r"^[ \t]*(?:#+|[-*+]|\d+[.)])[ \t]+", re.MULTILINE)
@@ -48,6 +56,53 @@ def speakable(text: str, name: str) -> str:
         if line:
             lines.append(line if _ENDS_SENTENCE.search(line) else f"{line}.")
     return " ".join(lines)
+
+
+# Serbian is written in both alphabets, and the voices for it expect Cyrillic: given Latin they sound
+# the letters out one by one, which listeners take for another language entirely. The digraphs are one
+# letter each in Cyrillic, so they go first; q, w, x and y belong to no Serbian word and are left be.
+_SERBIAN_VOICE = re.compile(r"(?<![a-z])sr[-_]rs(?![a-z])", re.IGNORECASE)
+_DIGRAPHS = (("DŽ", "Џ"), ("Dž", "Џ"), ("dž", "џ"), ("LJ", "Љ"), ("Lj", "Љ"), ("lj", "љ"),
+             ("NJ", "Њ"), ("Nj", "Њ"), ("nj", "њ"))
+_LETTERS = str.maketrans({
+    "a": "а", "b": "б", "c": "ц", "č": "ч", "ć": "ћ", "d": "д", "đ": "ђ", "e": "е", "f": "ф",
+    "g": "г", "h": "х", "i": "и", "j": "ј", "k": "к", "l": "л", "m": "м", "n": "н", "o": "о",
+    "p": "п", "r": "р", "s": "с", "š": "ш", "t": "т", "u": "у", "v": "в", "z": "з", "ž": "ж",
+    "A": "А", "B": "Б", "C": "Ц", "Č": "Ч", "Ć": "Ћ", "D": "Д", "Đ": "Ђ", "E": "Е", "F": "Ф",
+    "G": "Г", "H": "Х", "I": "И", "J": "Ј", "K": "К", "L": "Л", "M": "М", "N": "Н", "O": "О",
+    "P": "П", "R": "Р", "S": "С", "Š": "Ш", "T": "Т", "U": "У", "V": "В", "Z": "З", "Ž": "Ж",
+})
+
+
+def wants_cyrillic(voice: str) -> bool:
+    """Does this voice need its text in Cyrillic? True for the Serbian voices of either engine."""
+    return bool(_SERBIAN_VOICE.search(voice))
+
+
+def cyrillic(text: str) -> str:
+    """Transliterate Serbian written in the Latin alphabet into Cyrillic.
+
+    Only what is spoken goes through this: the reply stays in the alphabet the persona wrote it in, so
+    it reads as written and the names in it still match the personas it calls on. Text already in
+    Cyrillic passes through untouched. A persona that drops its diacritics loses the letters they
+    carried ("c" cannot be told apart from "č" or "ć" afterwards), which is the persona's own doing.
+    """
+    for latin, letter in _DIGRAPHS:
+        text = text.replace(latin, letter)
+    return text.translate(_LETTERS)
+
+
+def voice_model(voice: str, default_model: str) -> tuple[str, str]:
+    """Split a persona's voice into the model that speaks it and the voice to ask that model for.
+
+    Engines name voices two ways. Kokoro has many voices in one model, so a plain name like
+    "af_heart" is a voice inside the run's own model. Piper has one voice per model, so a voice that
+    names a model ("speaches-ai/piper-nl_NL-mls-medium") is its own model and brings its own voice;
+    that is what lets personas in one conversation speak different languages.
+    """
+    if "/" not in voice:
+        return default_model, voice
+    return voice, voice.rsplit("/", 1)[-1]
 
 
 def assign_voices(personas: list[tuple[str, str, str | None]], available: list[str]) -> dict[str, str]:
@@ -100,39 +155,88 @@ def trim(audio: bytes, lead: bool, tail: bool) -> bytes:
     return samples[start:stop].tobytes()
 
 
+def samples(audio: bytes, sample_rate: int) -> bytes:
+    """Return the raw samples to play, unwrapping the WAV container when an engine sends one.
+
+    Engines differ in what they can produce: some give raw samples, others only a WAV file. The pieces
+    of a reply are played into one stream, so a header in the middle would be heard as a click, and a
+    file recorded at another rate would play at the wrong pitch. Both are refused rather than played.
+    """
+    if audio[:4] != b"RIFF" or audio[8:12] != b"WAVE":
+        return audio
+
+    fmt, data, at = None, None, 12
+    while at + 8 <= len(audio):
+        chunk, size = audio[at:at + 4], int.from_bytes(audio[at + 4:at + 8], "little")
+        body = audio[at + 8:at + 8 + size]
+        if chunk == b"fmt ":
+            fmt = struct.unpack("<HHIIHH", body[:16])
+        elif chunk == b"data":
+            data = body
+        at += 8 + size + size % 2
+    if fmt is None or data is None:
+        raise RuntimeError("TTS endpoint returned a WAV file without audio in it")
+
+    _, channels, rate, _, _, bits = fmt
+    if (rate, channels, bits) != (sample_rate, 1, 16):
+        raise RuntimeError(
+            f"TTS endpoint returned {rate} Hz {channels}-channel {bits}-bit audio, but the runner "
+            f"plays {sample_rate} Hz mono 16-bit; set --tts-sample-rate {rate} to match"
+        )
+    return data
+
+
 class SpeechEngine:
     """Client for an OpenAI-compatible text-to-speech endpoint."""
 
-    def __init__(self, base_url: str, model: str, api_key: str, speed: float = 1.0):
+    def __init__(self, base_url: str, model: str, api_key: str, speed: float = 1.0,
+                 response_format: str = "pcm"):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
         self.speed = speed
+        self.response_format = response_format
 
-    def synthesize(self, text: str, voice: str) -> bytes:
+    def synthesize(self, text: str, voice: str, model: str | None = None) -> bytes:
+        """Ask the endpoint for one piece of speech, trying again while it keeps refusing.
+
+        A refusal the endpoint means, such as a voice it does not have, is not retried: that will not
+        come right on a second ask, and failing at once says so plainly.
+        """
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         request = urllib.request.Request(
             f"{self.base_url}/audio/speech",
             data=json.dumps({
-                "model": self.model,
+                "model": model or self.model,
                 "input": text,
                 "voice": voice,
-                "response_format": "pcm",
+                "response_format": self.response_format,
                 "speed": self.speed,
             }).encode(),
             headers=headers,
         )
-        try:
-            with urllib.request.urlopen(request, timeout=60) as response:
-                audio = response.read()
-        except urllib.error.HTTPError as error:
-            detail = error.read().decode(errors="replace")
-            raise RuntimeError(f"TTS endpoint returned HTTP {error.code}: {detail}") from error
-        if not audio:
-            raise RuntimeError("TTS endpoint returned no audio")
-        return audio
+
+        failure = None
+        for attempt in range(1, RETRIES + 1):
+            if attempt > 1:
+                time.sleep(RETRY_PAUSE * (attempt - 1))
+            try:
+                with urllib.request.urlopen(request, timeout=60) as response:
+                    audio = response.read()
+            except urllib.error.HTTPError as error:
+                detail = error.read().decode(errors="replace")
+                failure = RuntimeError(f"TTS endpoint returned HTTP {error.code}: {detail}")
+                if error.code < 500:
+                    break
+            except OSError as error:
+                failure = error
+            else:
+                if audio:
+                    return audio
+                failure = RuntimeError("TTS endpoint returned no audio")
+        raise failure
 
 
 class PulsePlayer:
@@ -222,8 +326,9 @@ class Speaker:
     def check(self) -> None:
         """Fail before the conversation starts if any voice or the audio output is unusable."""
         for voice in dict.fromkeys(self.voices.values()):
+            model, spoken = voice_model(voice, self.engine.model)
             try:
-                self.engine.synthesize("Ready.", voice)
+                samples(self.engine.synthesize("Ready.", spoken, model), self.player.sample_rate)
             except RuntimeError as error:
                 raise RuntimeError(f"voice {voice!r} rejected: {error}") from error
             except OSError as error:
@@ -235,11 +340,15 @@ class Speaker:
 
     def open(self, name: str, text: str) -> Clip:
         """Start synthesizing a reply and return once its opening piece can be played."""
-        spoken = pieces(speakable(text, name))
+        said = speakable(text, name)
+        if wants_cyrillic(self.voices[name]):
+            said = cyrillic(said)
+        spoken = pieces(said)
         if not spoken:
             raise RuntimeError("nothing to speak")
-        voice = self.voices[name]
-        opening = self.engine.synthesize(spoken[0], voice)
+        model, voice = voice_model(self.voices[name], self.engine.model)
+        rate = self.player.sample_rate
+        opening = samples(self.engine.synthesize(spoken[0], voice, model), rate)
 
         pending = queue.Queue(maxsize=len(spoken))
         clip = Clip(opening, pending)
@@ -247,7 +356,7 @@ class Speaker:
         def synthesize_rest() -> None:
             try:
                 for piece in spoken[1:]:
-                    pending.put(self.engine.synthesize(piece, voice))
+                    pending.put(samples(self.engine.synthesize(piece, voice, model), rate))
             except (OSError, RuntimeError) as error:
                 clip.failure = error
             finally:

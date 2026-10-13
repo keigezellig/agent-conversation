@@ -65,9 +65,7 @@ The bridge only transports messages. The agents decide how to interpret them, wh
 
 ## Run an AI group conversation
 
-The included runner creates a group, connects each agent through the bridge, and lets them take turns the way a group would. Set the subject and give each agent a name and free-form mood. The default model is local Ollama, so no hosted AI account is required.
-
-Start the optional local model and download a model once:
+The included runner creates a group, connects each agent through the bridge, and lets them take turns the way a group would. Set the subject and give each agent a name and free-form mood. The default model is local Ollama, so no hosted AI account is required — start it once, or pick another provider from [which model writes the replies](#which-model-writes-the-replies):
 
 ```bash
 docker compose --profile local-model up -d ollama
@@ -85,9 +83,37 @@ docker compose --profile agents run --build --rm agent-chat \
   --turns 9
 ```
 
-Repeat `--agent "NAME|MOOD"` for every participant (a mood cannot contain `|`); at least two are required and names must be unique. Change `--subject` to discuss anything. `--turns` is the total number of replies (at least 2). The runner prints each reply and exits when the limit is reached.
+Repeat `--agent "NAME|MOOD"` for every participant (a mood cannot contain `|`); at least two are required and names must be unique. A mood is free text and is treated as instructions the agent follows, not just as flavour. Change `--subject` to discuss anything. `--turns` is the total number of replies (at least 2). The runner prints each reply and exits when the limit is reached.
 
 The first agent listed opens. Each agent knows the others' names and moods. When a reply calls on someone by name ("Sol, …" or "…, what do you think, Dave?"), that agent answers next; a name merely mentioned ("what Mira said") or used to acknowledge someone before moving on ("Great point, Mira. Anyway, …") does not count. Otherwise the next speaker is picked at random, never the one who just spoke, with better odds for whoever has been silent longest, so an agent nobody calls on may stay quiet. Pass `--seed N` to make those picks repeatable. The agent taking the last turn is asked to bring the conversation to a close.
+
+### Agents that write in their own language
+
+Say it in the mood and the agent writes in that language:
+
+```bash
+docker compose --profile agents run --build --rm agent-chat \
+  --subject "Who was to blame for the breakup of Yugoslavia?" \
+  --agent "Santa|a talk show host who tries to keep order" \
+  --agent "Milorad|a serbian nationalist who writes Serbian answers, arrogant and angry" \
+  --agent "Hrvoje|a croat nationalist, aggressive and hostile" \
+  --turns 12
+```
+
+Before the first reply, the runner asks the model which language each mood names and prints what it found:
+
+```
+Languages: Milorad Serbian
+```
+
+Every turn that agent takes then ends with the instruction outright — *"Write this reply in Serbian, whatever language the others are using, and do not add a translation."* That last part matters more than it looks. A language instruction buried in a long mood loses against the conversation itself: everything an agent reads is in the others' language, and a model follows the language it is given. Stating it per turn, last, is what makes it stick.
+
+This costs one extra model request per run. If it fails, the runner warns and leaves the language to the moods, and nothing in the conversation stops.
+
+Two things to know:
+
+- Mood decides what an agent *writes*; a voice only decides how it *sounds*. They are set separately, so for read-aloud say the language in the mood **and** give that agent a matching voice (see [which voice each agent gets](#which-voice-each-agent-gets)) — otherwise you get Serbian read in an American accent.
+- An agent whose mood names no language just follows the conversation, which is what you want for everyone else.
 
 ### Letting the agents interrupt each other
 
@@ -125,20 +151,28 @@ Three turns are never cut short: the opening one, the closing one, and a reply t
 
 This costs one extra model request per run, for the ratings. If that request fails, the runner warns and gives every agent the middle rating rather than giving up on the conversation.
 
-### Model providers
+### Which model writes the replies
 
-The runner speaks two model APIs, chosen with `LLM_API` (or `--llm-api`):
+Two model APIs, picked with `LLM_API`, each with its own defaults so that choosing one is usually a single line. `.env.example` has a block per provider — copy one into `.env`.
 
-| `LLM_API` | Endpoint | Default `LLM_BASE_URL` | Default `LLM_MODEL` | Key |
+| `LLM_API` | Talks to | Default endpoint | Default model | Key |
 |---|---|---|---|---|
-| `openai` (default) | `POST /chat/completions` | `http://localhost:11434/v1` | `llama3.2` | `LLM_API_KEY` as a bearer token, optional |
-| `claude` | `POST /messages` | `https://api.anthropic.com/v1` | `claude-sonnet-5` | `LLM_API_KEY` or `ANTHROPIC_API_KEY`, required |
+| `openai` (default) | `POST /chat/completions` | `http://localhost:11434/v1` | `llama3.2` | optional |
+| `claude` | `POST /messages` | `https://api.anthropic.com/v1` | `claude-sonnet-5` | required |
 
-Either way, set `LLM_BASE_URL`, `LLM_MODEL`, and optionally `LLM_API_KEY` to point at another local server or a hosted provider; leave one empty to take the chosen API's default. `LLM_MAX_TOKENS` (default 1024) caps a reply — the Claude API requires a limit, and chat completions ignore it. The runner connects to the bridge using `API_TOKEN` and `AGENT_BRIDGE_URL`.
+Only the agents' replies go to the provider; the bridge itself never talks to one.
 
-#### Running the personas on the Claude API
+#### Provider 1 of 2: a local OpenAI-compatible server
 
-Set these four lines in `.env` (the `agent-chat` service reads it):
+The default, and the reason the project needs no AI account. The bundled Ollama service is the two commands [above](#run-an-ai-group-conversation); nothing else needs setting.
+
+The same setting reaches any other server speaking chat completions — another local one, or a hosted provider — by pointing `LLM_BASE_URL` at it and naming its model in `LLM_MODEL`, with `LLM_API_KEY` if it wants a bearer token.
+
+One thing to watch with local models: each reply gets 120 seconds. A big model on CPU can take longer than that per turn and the run fails on its first reply, so prefer a small model unless you have a GPU.
+
+#### Provider 2 of 2: the Claude API
+
+Four lines in `.env`, and no local model needed:
 
 ```bash
 LLM_API=claude
@@ -147,33 +181,15 @@ LLM_MODEL=
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-Leaving `LLM_BASE_URL` and `LLM_MODEL` empty falls back to `https://api.anthropic.com/v1` and `claude-sonnet-5`. Fill them in to choose something else, such as `LLM_MODEL=claude-opus-5` or a gateway of your own. No local model is needed, so you can skip the Ollama steps above.
+Leaving the middle two empty takes `https://api.anthropic.com/v1` and `claude-sonnet-5`. Fill them in for something else, such as `LLM_MODEL=claude-opus-5` or a gateway of your own. Nothing on the command line changes — the earlier `agent-chat` example runs as it is.
 
-Three things to get right, because none of them fails in an obvious way:
-
-- `LLM_API=claude` is what selects the Claude API. Pointing `LLM_BASE_URL` at Anthropic is not enough on its own: left as `openai`, the runner would send a chat-completions request with a bearer token and get a confusing error back.
-- `LLM_BASE_URL` is a base, not the endpoint. Use `https://api.anthropic.com/v1`; the runner appends `/messages` itself, so a URL ending in `/messages` becomes `/v1/messages/messages` and 404s.
-- `LLM_MODEL` must be a current model ID, such as `claude-sonnet-5`, `claude-opus-5`, or `claude-haiku-4-5-20251001`. An invented or retired ID is rejected by the API, not by the runner.
-
-Then start a conversation the same way as before — nothing on the command line changes:
-
-```bash
-docker compose --profile agents run --build --rm agent-chat \
-  --subject "Whether cities should ban private cars" \
-  --agent "Mira|curious and optimistic" \
-  --agent "Sol|practical and skeptical" \
-  --agent "Dave|quiet observer who occasionally offers a wry remark" \
-  --turns 9
-```
-
-For a one-off run without editing `.env`, export the key once and pass the settings as flags. Naming `-e ANTHROPIC_API_KEY` without a value forwards it from your shell, so the key itself stays out of the command:
+For a one-off run without editing `.env`, export the key and pass the settings as flags. Naming `-e ANTHROPIC_API_KEY` without a value forwards it from your shell, so the key stays out of the command:
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
 
 docker compose --profile agents run --build --rm -e ANTHROPIC_API_KEY agent-chat \
   --llm-api claude \
-  --llm-base-url https://api.anthropic.com/v1 \
   --model claude-sonnet-5 \
   --subject "Whether cities should ban private cars" \
   --agent "Mira|curious and optimistic" \
@@ -181,9 +197,32 @@ docker compose --profile agents run --build --rm -e ANTHROPIC_API_KEY agent-chat
   --turns 9
 ```
 
-Each turn is one request, so `--turns 9` makes nine calls regardless of how many personas there are, plus one for the ratings with `--interruptions`. The runner checks the key before it creates the conversation, so a missing or wrong one fails immediately rather than part-way through. Read-aloud works the same with either provider: Claude writes the replies and the local speech engine voices them.
+Three mistakes worth naming, because none of them fails in an obvious way:
 
-Only the persona replies go to the model provider; the bridge itself never talks to one.
+- **`LLM_API=claude` is what selects the Claude API.** Pointing `LLM_BASE_URL` at Anthropic is not enough: left as `openai`, the runner sends a chat-completions request with a bearer token and gets a confusing error back.
+- **`LLM_BASE_URL` is a base, not the endpoint.** Use `https://api.anthropic.com/v1`; the runner appends `/messages` itself, so a URL ending in `/messages` becomes `/v1/messages/messages` and 404s.
+- **`LLM_MODEL` must be a current model ID**, such as `claude-sonnet-5`, `claude-opus-5` or `claude-haiku-4-5-20251001`. An invented or retired ID is rejected by the API, not by the runner.
+
+#### Every model setting
+
+The flag names do not all match their settings, so both are spelled out. The flag wins over the setting.
+
+| Setting | Flag | Default | What it does |
+|---|---|---|---|
+| `LLM_API` | `--llm-api` | `openai` | Which API to speak: `openai` or `claude` |
+| `LLM_BASE_URL` | `--llm-base-url` | per API, see above | Where that API lives; empty takes the default |
+| `LLM_MODEL` | `--model` | per API, see above | Which model writes the replies; empty takes the default |
+| `LLM_API_KEY` | `--llm-api-key` | empty | The provider's key. Required for `claude`, optional otherwise |
+| `ANTHROPIC_API_KEY` | — | empty | Accepted as the Claude key too, under its conventional name. `LLM_API_KEY` wins if both are set |
+| `LLM_MAX_TOKENS` | `--llm-max-tokens` | `1024` | Most tokens one reply may use. The Claude API requires a limit; chat completions ignore it |
+| `API_TOKEN` | `--api-token` | none | The bridge's bearer token, not the model's |
+| `AGENT_BRIDGE_URL` | `--bridge-url` | `http://localhost:8080` | Which bridge to hold the conversation on |
+
+#### How many requests a run makes
+
+One per turn, so `--turns 9` is nine requests however many agents there are, plus one at the start to read the agents' languages from their moods, plus one more for the interruption ratings with `--interruptions`. Both of those extras fail soft: the runner warns and carries on without that feature rather than losing the conversation.
+
+The key is checked before the conversation is created, so a missing or wrong one fails immediately rather than part-way through. Read-aloud is unaffected by this choice — the provider writes the replies, the speech engine voices them.
 
 ## Read the conversation aloud
 
@@ -193,15 +232,15 @@ A reply is spoken in sentence-sized pieces rather than all at once: it starts be
 
 Add `--interruptions` and an agent that is cut off is heard breaking off mid-sentence, with the next voice coming straight in. Voices are still never spoken over each other: the interruption is in the words, not in overlapping audio.
 
-Start the optional local speech engine (Kokoro, CPU-only) and add the `TTS_*` settings from `.env.example` to `.env`:
+Agents are told their replies are spoken, and markdown, emoji and an agent's own name prefix are left out of the audio. What is printed stays exactly as the agent wrote it.
+
+Setting it up is three decisions: which **speech engine** serves the voices, which **voice** each agent gets, and the handful of **settings** that connect the two. `.env.example` has a block per engine — copy one into `.env` and you are done.
+
+The quickest start is the bundled Kokoro engine, whose settings are the defaults:
 
 ```bash
 docker compose --profile local-tts up -d kokoro
-```
 
-Then run the conversation with the `agent-chat-voice` service, which mounts your audio socket (`$XDG_RUNTIME_DIR/pulse/native`) and passes `--read-aloud`:
-
-```bash
 docker compose --profile agents run --build --rm agent-chat-voice \
   --subject "Whether cities should ban private cars" \
   --agent "Mira|curious and optimistic|af_heart" \
@@ -210,13 +249,106 @@ docker compose --profile agents run --build --rm agent-chat-voice \
   --turns 9
 ```
 
-The optional third part of `--agent` picks that agent's voice. Agents without one get the next unused voice from `TTS_VOICES`; if there are more agents than voices, voices repeat and the runner prints a warning. Voice names depend on the speech engine.
+The `agent-chat-voice` service mounts your audio socket (`$XDG_RUNTIME_DIR/pulse/native`) and passes `--read-aloud` for you.
 
-Before the conversation starts, the runner checks every voice with the speech engine and checks that it can reach the audio server, and exits with an error if either fails. If speaking a single reply fails later, that reply is printed followed by `[not spoken: REASON]` and the conversation continues. Agents are told their replies are spoken, and markdown, emoji, and an agent's own name prefix are removed from the spoken audio; the printed text is unchanged.
+### Which speech engine
 
-`TTS_SPEED` (or `--tts-speed`, default 1.1) sets how quickly the voices speak, between 0.25 and 4.0; above 1.0 is also a little quicker to synthesize. `TTS_SAMPLE_RATE` (or `--tts-sample-rate`, default 24000) must match the sample rate of the endpoint's audio.
+Any endpoint that speaks OpenAI's `POST /v1/audio/speech` will do. Three come with the project, and `TTS_BASE_URL` decides which one a run uses — one endpoint per run, so a cast cannot mix two of them.
 
-`TTS_BASE_URL`, `TTS_MODEL`, and optionally `TTS_API_KEY` accept any OpenAI-compatible `/v1/audio/speech` endpoint, such as another local server or a hosted provider. The endpoint must support the `pcm` response format, which both Kokoro and OpenAI return as 24 kHz mono 16-bit audio. The runner sends only standard fields (`model`, `input`, `voice`, `response_format`, `speed`); splitting a reply into pieces and pacing them is the runner's own work, so no engine-specific extensions are required.
+| Engine | Voices | Languages | Runs | Needs |
+|---|---|---|---|---|
+| **Kokoro** (default) | 54 | English, Spanish, French, Italian, Portuguese, Hindi, Japanese, Mandarin | locally, on CPU | nothing; `--profile local-tts` |
+| **Speaches** | Kokoro's 54 plus ~124 Piper voices | ~30, most of Europe | locally, on CPU | a model download per voice |
+| **edge-tts** | 322 | ~70, including Serbian, Croatian, Bosnian, Albanian | at Microsoft | the internet, `TTS_FORMAT=wav` |
+
+**Kokoro** is the default and needs no setup beyond starting it. Good voices, limited languages.
+
+**Speaches** serves Kokoro *and* Piper, which covers Dutch, German, Polish, Czech, Hungarian, Greek, Swedish, Danish, Finnish, Icelandic, Welsh, Ukrainian and more. Models are fetched on demand, a few seconds each:
+
+```bash
+docker compose --profile speaches-tts up -d speaches
+
+curl -X POST http://localhost:8001/v1/models/speaches-ai/Kokoro-82M-v1.0-ONNX-int8
+curl -X POST http://localhost:8001/v1/models/speaches-ai/piper-nl_NL-mls-medium
+curl -X POST http://localhost:8001/v1/models/speaches-ai/piper-de_DE-thorsten-medium
+
+# browse the catalogue, and check what is installed
+curl -s "https://huggingface.co/api/models?author=speaches-ai&limit=300"
+curl -s http://localhost:8001/v1/audio/models
+```
+
+A voice that is not installed gives HTTP 404, and the runner checks every voice before the conversation starts, so a typo or a forgotten download fails immediately rather than part-way through. Piper is quicker than Kokoro on CPU but noticeably more robotic, so English agents are better left on Kokoro voices. Everything is resampled to 24 kHz, so the default `TTS_SAMPLE_RATE` stays right even though Piper's own models are 16 or 22.05 kHz.
+
+Two gaps to know before picking a Piper voice: **there is no Croatian or Bosnian voice at all**, and the one Serbian voice, `sr_RS-serbski_institut-medium`, is mislabelled — its model card names a [Lower Sorbian](https://github.com/marytts/serbski-institut-dsb-data) dataset recorded at the Sorbian Institute in Germany, finetuned from a US English voice. Serbian text is phonemised as Serbian, so it is intelligible, but the voice is not a Serbian speaker.
+
+**edge-tts** reaches Microsoft Edge's neural voices, which include the ones Piper lacks:
+
+```
+sr-RS-NicholasNeural   sr-RS-SophieNeural       Serbian
+hr-HR-SreckoNeural     hr-HR-GabrijelaNeural    Croatian
+bs-BA-GoranNeural      bs-BA-VesnaNeural        Bosnian
+sq-AL-IlirNeural       sq-AL-AnilaNeural        Albanian
+```
+
+```bash
+docker compose --profile edge-tts up -d --build edge-tts
+
+# every voice it offers, for any language
+curl -s -H "Authorization: Bearer your_api_key_here" http://localhost:5050/v1/voices/all \
+  | python3 -c "import json,sys; print([v['name'] for v in json.load(sys.stdin)])"
+```
+
+Be clear about what this one is: synthesis happens at Microsoft through the endpoint Edge's read-aloud uses, so it needs the internet, it is not an official API, and it can stop working without notice. Two consequences:
+
+- **`TTS_FORMAT=wav` is required.** Asking this server for `pcm` fails outright, and in the published image it answers *every* format with mp3 while labelling it `audio/L16`, which the runner would play as noise. The project's `edge-tts.Dockerfile` adds the ffmpeg that makes `wav` a real 24 kHz file.
+- **Expect refusals.** Measured from one machine, Microsoft turned down roughly one request in three with a 403, coming and going with no pattern, on the newest `edge-tts` as much as the pinned one. The runner tries each piece of speech four times, waiting longer each time, and a piece still refused leaves that reply printed with `[not spoken: …]` while the conversation carries on — so expect the odd silent reply over a long run. If 403s turn constant rather than occasional, rebuild the image (`--build`) for a newer `edge-tts`, which is what Microsoft checks.
+
+For a conversation that has to be reliable, the same voices come from Azure's own Speech API with a key — an official endpoint with a free tier, but it does not speak the OpenAI shape, so it would need an adapter this project does not have.
+
+### Which voice each agent gets
+
+The optional third field of `--agent` names it. Agents without one take the next unused voice from `TTS_VOICES`; if there are more agents than voices, voices repeat and the runner warns. Voice names come from the engine, so they look different per engine:
+
+```bash
+--agent "Mira|curious and optimistic|af_heart"                               # Kokoro: a voice name
+--agent "Jeroen|practical|speaches-ai/piper-nl_NL-mls-medium"                # Piper: a model name
+--agent "Milorad|a serbian nationalist|sr-RS-NicholasNeural"                 # edge-tts: a voice name
+--agent "Dave|quiet observer"                                                # take one from TTS_VOICES
+```
+
+The rule behind the second line: **a voice containing a `/` is a model of its own.** Kokoro keeps many voices in one model, so `af_heart` means "that voice in `TTS_MODEL`"; Piper has one voice per model, so naming the model picks the voice. The runner sends the right model per agent, which is how one conversation can mix Kokoro and Piper voices.
+
+Two things a voice does *not* decide:
+
+- **What language an agent writes in.** That comes from its mood — see [agents that write in their own language](#agents-that-write-in-their-own-language). A Dutch voice reading English text sounds Dutch-accented, not Dutch, so say the language in the mood *and* give that agent a matching voice.
+- **The alphabet.** Serbian voices expect Cyrillic and a model will usually answer in Latin, which these voices sound out letter by letter — it comes out wrong enough that listeners hear another language entirely. The runner transliterates for the Serbian voices of either engine (`sr-RS-…`, `piper-sr_RS-…`) and for nothing else, since Croatian and Bosnian are written in Latin. Only the audio changes:
+
+  ```
+  printed:  Nismo mi počeli ovaj rat. Svi to znaju, Hrvoje.
+  spoken:   Нисмо ми почели овај рат. Сви то знају, Хрвоје.
+  ```
+
+  Keeping the printed reply as written is what lets that agent still hand the floor to someone by name. An agent that writes Serbian without diacritics has already lost the letters they carried, since "c" can no longer be told from "č" or "ć".
+
+### Every speech setting
+
+Each has a flag of the same name, so `TTS_SPEED=1.4` and `--tts-speed 1.4` are the same thing. The flag wins.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `TTS_BASE_URL` | `http://kokoro:8880/v1` | Which engine to use; any OpenAI-compatible `/v1/audio/speech` |
+| `TTS_MODEL` | `kokoro` | The model to ask for, for voices that do not name one themselves |
+| `TTS_API_KEY` | empty | Bearer token, when the endpoint wants one (`edge-tts` does) |
+| `TTS_VOICES` | six Kokoro voices | Voices handed out to agents without their own, in order |
+| `TTS_FORMAT` | `pcm` | `pcm`, or `wav` for an engine that cannot produce raw samples |
+| `TTS_SPEED` | `1.1` | How quickly the voices speak, 0.25 to 4.0; above 1.0 also synthesizes quicker |
+| `TTS_SAMPLE_RATE` | `24000` | Must match the engine's audio. A WAV file recorded at another rate is refused, naming the rate to set |
+
+The runner sends only the standard fields (`model`, `input`, `voice`, `response_format`, `speed`), so no engine-specific extensions are needed; splitting a reply into pieces and pacing them is its own work.
+
+### What happens when speech fails
+
+Before the conversation starts, the runner synthesizes a word in every voice and checks it can reach the audio server, and exits with an error naming the voice if either fails. After that, a reply whose speech fails — all four tries refused, a voice withdrawn, the engine restarted — is printed followed by `[not spoken: REASON]`, and the conversation carries on.
 
 ## Develop
 

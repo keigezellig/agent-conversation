@@ -46,5 +46,28 @@ services:
     image: ghcr.io/remsky/kokoro-fastapi-cpu:latest
     profiles: [local-tts]
 
+  # Alternative speech engine: serves Kokoro and ~124 Piper voices across European languages, so
+  # personas can speak different languages in one conversation. Models are downloaded on demand,
+  # which is why the port is published: POST to it from the host (see the README).
+  speaches:
+    image: ghcr.io/speaches-ai/speaches:latest-cpu
+    profiles: [speaches-tts]
+    ports:
+      - "127.0.0.1:8001:8000"
+    volumes:
+      - speaches-models:/home/ubuntu/.cache/huggingface/hub
+
+  # Microsoft Edge's neural voices, for languages no local engine has a voice for. Synthesis happens
+  # at Microsoft, so this needs no model downloads and no GPU, but it does need the internet and it
+  # is not an official API. The port is published so you can list the voices from the host.
+  edge-tts:
+    build:
+      context: .
+      dockerfile: edge-tts.Dockerfile
+    profiles: [edge-tts]
+    ports:
+      - "127.0.0.1:5050:5050"
+
 volumes:
   ollama-data:
+  speaches-models:

@@ -1,9 +1,15 @@
+import io
+import json
+import struct
 import threading
+import urllib.error
 from array import array
 
 import pytest
 
-from app.speech import MIN_OPENING, PAUSE_MS, SILENCE, Speaker, assign_voices, pieces, speakable, trim
+from app import speech
+from app.speech import (MIN_OPENING, PAUSE_MS, SILENCE, SpeechEngine, Speaker, assign_voices,
+                        cyrillic, pieces, samples, speakable, trim, voice_model, wants_cyrillic)
 
 
 def _audio(*samples: int) -> bytes:
@@ -96,17 +102,19 @@ LOUD = 5000
 class FakeEngine:
     """Speech engine returning one loud sample per word, padded with silence like a real one."""
 
-    def __init__(self, rejected=(), failing=(), held=()):
+    def __init__(self, rejected=(), failing=(), held=(), model="kokoro"):
         self.rejected = rejected
         self.failing = failing
         self.held = set(held)
         self.released = threading.Event()
         self.spoken = []
+        self.models = []
+        self.model = model
 
     def release(self):
         self.released.set()
 
-    def synthesize(self, text, voice):
+    def synthesize(self, text, voice, model=None):
         if text in self.held:
             assert self.released.wait(5), "a held piece was never released"
         if voice in self.rejected:
@@ -114,6 +122,7 @@ class FakeEngine:
         if text in self.failing:
             raise RuntimeError("TTS endpoint returned no audio")
         self.spoken.append((text, voice))
+        self.models.append(model or self.model)
         return _audio(0, *([LOUD] * len(text.split())), 0)
 
 
@@ -133,6 +142,191 @@ class FakePlayer:
     def play(self, audio):
         for piece in audio:
             self.played += piece
+
+
+@pytest.mark.parametrize("latin, expected", [
+    ("Nismo mi počeli ovaj rat.", "Нисмо ми почели овај рат."),
+    # The digraphs are single Cyrillic letters, in either case.
+    ("Džemal, ljudi i njihova deca", "Џемал, људи и њихова деца"),
+    ("Ljubav i NJEGOVA kuća", "Љубав и ЊЕГОВА кућа"),
+    ("ĐURO i Žarko šalju ćevape", "ЂУРО и Жарко шаљу ћевапе"),
+    # Names come along, so a Serbian voice says them the Serbian way.
+    ("Hrvoje, ti to dobro znaš!", "Хрвоје, ти то добро знаш!"),
+    # Already Cyrillic, and punctuation and digits, are left alone.
+    ("Нисмо ми почели овај рат.", "Нисмо ми почели овај рат."),
+    ("1991. godine", "1991. године"),
+])
+def test_serbian_latin_is_transliterated_for_speech(latin, expected):
+    assert cyrillic(latin) == expected
+
+
+@pytest.mark.parametrize("voice, wanted", [
+    ("sr-RS-NicholasNeural", True),
+    ("speaches-ai/piper-sr_RS-serbski_institut-medium", True),
+    ("hr-HR-SreckoNeural", False),   # Croatian is written in Latin only
+    ("af_heart", False),
+    ("en-US-AndrewNeural", False),
+])
+def test_only_serbian_voices_ask_for_cyrillic(voice, wanted):
+    assert wants_cyrillic(voice) is wanted
+
+
+def test_a_serbian_voice_is_given_cyrillic_and_the_reply_itself_is_untouched():
+    engine = FakeEngine()
+    reply = "Nismo mi počeli ovaj rat. Svi to znaju, Hrvoje."
+    Speaker(engine, FakePlayer(), {"Milorad": "sr-RS-NicholasNeural"}).open("Milorad", reply)
+    assert "Нисмо ми почели овај рат." in engine.spoken[0][0]
+    assert "Nismo" not in engine.spoken[0][0]
+
+
+def test_a_croatian_voice_keeps_the_latin_it_was_given():
+    engine = FakeEngine()
+    Speaker(engine, FakePlayer(), {"Hrvoje": "hr-HR-SreckoNeural"}).open(
+        "Hrvoje", "To je obična laž i ti to dobro znaš.")
+    assert engine.spoken[0][0].startswith("To je obična laž")
+
+
+def _wav(audio: bytes, rate=24000, channels=1, bits=16, extra=b"") -> bytes:
+    fmt = struct.pack("<HHIIHH", 1, channels, rate, rate * channels * bits // 8,
+                      channels * bits // 8, bits)
+    body = (b"WAVE" + extra + b"fmt " + struct.pack("<I", len(fmt)) + fmt
+            + b"data" + struct.pack("<I", len(audio)) + audio)
+    return b"RIFF" + struct.pack("<I", len(body)) + body
+
+
+def test_raw_samples_are_passed_through_untouched():
+    audio = _audio(0, LOUD, 0)
+    assert samples(audio, 24000) == audio
+
+
+def test_a_wav_file_is_unwrapped_to_its_samples():
+    audio = _audio(0, LOUD, -LOUD, 0)
+    assert samples(_wav(audio), 24000) == audio
+
+
+def test_chunks_before_the_format_are_skipped():
+    # ffmpeg writes a LIST chunk of its own before the audio.
+    audio = _audio(LOUD, LOUD)
+    padded = _wav(audio, extra=b"LIST" + struct.pack("<I", 4) + b"INFO")
+    assert samples(padded, 24000) == audio
+
+
+@pytest.mark.parametrize("kwargs, complaint", [
+    ({"rate": 22050}, "22050 Hz"),
+    ({"channels": 2}, "2-channel"),
+    ({"bits": 8}, "8-bit"),
+])
+def test_audio_the_player_cannot_play_is_refused_with_what_to_change(kwargs, complaint):
+    with pytest.raises(RuntimeError, match=complaint):
+        samples(_wav(_audio(LOUD), **kwargs), 24000)
+
+
+def test_a_wav_without_audio_is_an_error():
+    with pytest.raises(RuntimeError, match="without audio"):
+        samples(b"RIFF" + struct.pack("<I", 4) + b"WAVE", 24000)
+
+
+def test_the_requested_format_is_what_the_engine_asks_for(monkeypatch):
+    sent = _answering(monkeypatch, _wav(_audio(LOUD)))
+    assert _engine("wav").synthesize("Hello.", "hr-HR-SreckoNeural")[:4] == b"RIFF"
+    assert sent[0]["response_format"] == "wav"
+    assert sent[0]["voice"] == "hr-HR-SreckoNeural"
+
+
+def _answering(monkeypatch, *replies):
+    """Answer each synthesis request with the next scripted reply: bytes, or an error to raise."""
+    sent = []
+
+    class FakeResponse(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *exception): self.close()
+
+    def urlopen(request, timeout=None):
+        sent.append(json.loads(request.data))
+        reply = replies[min(len(sent), len(replies)) - 1]
+        if isinstance(reply, Exception):
+            raise reply
+        return FakeResponse(reply)
+
+    monkeypatch.setattr(speech.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(speech, "RETRY_PAUSE", 0)
+    return sent
+
+
+def _http(code):
+    return urllib.error.HTTPError("http://tts/v1/audio/speech", code, "boom", {}, io.BytesIO(b"busy"))
+
+
+def _engine(fmt="pcm"):
+    return SpeechEngine("http://tts/v1", "tts-1", "k", 1.0, fmt)
+
+
+def test_a_passing_refusal_is_tried_once_more(monkeypatch):
+    sent = _answering(monkeypatch, _http(500), _audio(LOUD))
+    assert _engine().synthesize("Hello.", "af_heart") == _audio(LOUD)
+    assert len(sent) == 2
+
+
+def test_a_refusal_the_endpoint_means_is_not_retried(monkeypatch):
+    sent = _answering(monkeypatch, _http(400))
+    with pytest.raises(RuntimeError, match="HTTP 400"):
+        _engine().synthesize("Hello.", "af_hart")
+    assert len(sent) == 1, "a voice the endpoint does not have will not appear on a second try"
+
+
+def test_refusals_all_the_way_through_are_reported(monkeypatch):
+    # A fresh error each time: an HTTPError's body can only be read once.
+    sent = _answering(monkeypatch, *[_http(503) for _ in range(speech.RETRIES)])
+    with pytest.raises(RuntimeError, match="HTTP 503: busy"):
+        _engine().synthesize("Hello.", "af_heart")
+    assert len(sent) == speech.RETRIES
+
+
+def test_a_piece_refused_a_few_times_still_gets_through(monkeypatch):
+    sent = _answering(monkeypatch, _http(500), _http(500), _audio(LOUD))
+    assert _engine().synthesize("Hello.", "af_heart") == _audio(LOUD)
+    assert len(sent) == 3
+
+
+def test_a_dropped_connection_is_tried_once_more(monkeypatch):
+    sent = _answering(monkeypatch, OSError("connection reset"), _audio(LOUD))
+    assert _engine().synthesize("Hello.", "af_heart") == _audio(LOUD)
+    assert len(sent) == 2
+
+
+def test_an_empty_answer_is_still_an_error(monkeypatch):
+    _answering(monkeypatch, b"", b"")
+    with pytest.raises(RuntimeError, match="no audio"):
+        _engine().synthesize("Hello.", "af_heart")
+
+
+PIPER_NL = "speaches-ai/piper-nl_NL-mls-medium"
+
+
+@pytest.mark.parametrize("voice, expected", [
+    # A plain name is one of many voices inside the run's own model.
+    ("af_heart", ("kokoro", "af_heart")),
+    # A voice that names a model is a model of its own, carrying its single voice.
+    (PIPER_NL, (PIPER_NL, "piper-nl_NL-mls-medium")),
+    ("speaches-ai/Kokoro-82M-v1.0-ONNX", ("speaches-ai/Kokoro-82M-v1.0-ONNX", "Kokoro-82M-v1.0-ONNX")),
+])
+def test_a_voice_naming_a_model_brings_its_own_model(voice, expected):
+    assert voice_model(voice, "kokoro") == expected
+
+
+def test_personas_can_speak_through_different_models_in_one_conversation():
+    engine = FakeEngine()
+    speaker = Speaker(engine, FakePlayer(), {"Mira": "af_heart", "Jeroen": PIPER_NL})
+    speaker.open("Mira", "Cars should go.")
+    speaker.open("Jeroen", "Dat is niet ver weg.")
+    assert engine.models == ["kokoro", PIPER_NL]
+    assert [voice for _, voice in engine.spoken] == ["af_heart", "piper-nl_NL-mls-medium"]
+
+
+def test_check_tries_every_model_a_voice_asks_for():
+    engine = FakeEngine()
+    Speaker(engine, FakePlayer(), {"Mira": "af_heart", "Jeroen": PIPER_NL}).check()
+    assert engine.models == ["kokoro", PIPER_NL]
 
 
 def test_check_names_the_rejected_voice():

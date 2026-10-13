@@ -332,6 +332,21 @@ def test_nothing_is_interrupted_without_eagerness_ratings():
     assert "—" not in " ".join(_relayed(recorder))
 
 
+def test_system_prompt_binds_the_mood_and_names_the_language_last():
+    mood = "practical and skeptical, you always speak Dutch"
+    others = [("Mira", "curious")]
+    assert f"follow it exactly: {mood}" in _system_prompt("Jeroen", mood, others, "cars")
+
+    # A known language is stated outright, and last, because that is the instruction replies drift from.
+    told = _system_prompt("Jeroen", mood, others, "cars", closing=True, language="Dutch")
+    assert told.endswith("Write this reply in Dutch, whatever language the others are using, "
+                         "and do not add a translation.")
+    # Without one, the persona is left to follow whatever its mood says.
+    untold = _system_prompt("Jeroen", mood, others, "cars")
+    assert "Write this reply in" not in untold
+    assert "If you are told to speak a particular language" in untold
+
+
 def test_system_prompt_marks_cutting_in_and_being_cut_off():
     others = [("Sol", "skeptical")]
     assert "cutting Sol off" in _system_prompt("Mira", "curious", others, "cars", interrupting="Sol")

@@ -44,6 +44,10 @@ _Avoid_: Barge-in, override, cut-in (as a noun)
 How readily a **Persona** cuts the others off, rated from 0 (always waits its turn) to 4 (talks over everyone), and the only thing that decides how often it interrupts.
 _Avoid_: Aggression, rudeness, interrupt rate
 
+**Language**:
+The language a **Persona** writes its **Replies** in, read from its mood at the start of a run. A **Persona** whose mood names none has no **Language** and follows the **Conversation**.
+_Avoid_: Locale, tongue, accent (which belongs to the **Voice**)
+
 **Voice**:
 The speaking voice a persona's replies are read aloud in, chosen per persona or assigned automatically.
 _Avoid_: Speaker, TTS voice
@@ -62,6 +66,12 @@ _Avoid_: Narration, TTS (as a domain term), recording
 - A **Reply** with an **Addressee** hands them the next **Turn**; otherwise the **Runner** picks the next **Persona** at random, never the one who just spoke, with the odds favouring whoever has been silent longest, so no fixed order emerges
 - An **Interruption** overrules both: the **Persona** who cut in takes the next **Turn**, and nobody the cut-off **Reply** called on gets it, not even an **Addressee** named in the part that was still heard
 - Each **Persona** knows the other **Personas**' names and moods, and may call on one of them, but usually speaks to the group
+- A mood is binding, not decoration: whatever it names, the **Persona** follows
+- A **Persona** with a **Language** writes every **Reply** in it, whatever language the others are using, and never adds a translation — left to the mood alone it drifts into the language of the **Replies** it reads, since everything it is given to read is in that language
+- A **Language** is read once at the start of a run, by asking the model which language each mood names, and each **Turn** is then told its **Language** outright as its last instruction; if the answer cannot be read, no **Persona** has a **Language** and the mood carries it alone
+- A **Language** is about what a **Persona** writes and a **Voice** about how it sounds: they are set separately and can disagree, so a **Persona** writing Serbian in an English-sounding **Voice** is a mistake the **Runner** does not correct
+- A **Voice** may name the model that speaks it, for engines that keep one voice per model; that is how **Personas** in one **Conversation** can be read aloud in different languages
+- Serbian is written in two alphabets and its **Voices** expect Cyrillic, so a **Reply** spoken in one of them is transliterated first; the shown **Reply** keeps the alphabet the **Persona** wrote in, which is what keeps its **Addressee** findable
 - A **Reply** is at most a few sentences; the **Runner** asks for a brief one on about a third of **Turns**, never on the opening or closing **Turn** or when the **Persona** is answering its addresser
 - A **Persona**'s mood shapes what it says and, through its **Eagerness**, how readily it interrupts; it never changes how long its **Reply** is or its odds in the random pick
 - **Eagerness** is rated once at the start of a run, by asking the model to judge each mood; a rating that cannot be read falls back to the middle of the scale, so an unhelpful answer costs realism but never the run
@@ -98,5 +108,9 @@ _Avoid_: Narration, TTS (as a domain term), recording
 - Deriving **Eagerness** from words in the mood text was considered — rejected: moods are free text in any language, so the model judges them instead, which is also why the rating is one request at the start of a run rather than a decision per **Turn**.
 - Giving each **Persona** its own **Eagerness** in `--agent` was considered — rejected: a mood like "never lets anyone finish" already says it, and a second knob could contradict it.
 - Cutting the audio off mid-playback, as a live interruption would, was considered — rejected: an **Interruption** is decided when the **Reply** is composed, so what is shown, relayed, and spoken stays the same text; stopping playback part-way would leave the other **Personas** answering words nobody heard.
+- Giving a **Persona** a language of its own in `--agent`, beside its mood, was considered — rejected: the mood is free text and already says it ("you write Serbian answers"), so a second field could only contradict it, and a **Persona** without a **Voice** would need an empty placeholder. The model reads the **Language** out of the mood instead, the way it rates **Eagerness**.
+- Relying on the mood alone, with the prompt asking the **Persona** to honour any language it names, was tried first — rejected: the instruction sits in the middle of a long mood and competes with a whole history in another language, and a measured comparison showed no improvement. A **Language** is now stated outright, as the **Turn**'s last instruction.
+- Taking a **Persona**'s **Language** from its **Voice** (`piper-sr_RS-…` meaning Serbian) was considered — rejected: **Read-aloud** is off on most runs, so the written language would depend on whether anyone is listening.
+- A **Persona** whose **Language** uses another script writes **Personas**' names in that script ("Хрвоје"), and an **Addressee** is found by matching the names as given, so such a **Reply** hands over the floor to nobody and the **Runner** picks at random — known, not yet resolved.
 - Letting the cut-off **Persona** carry on from the exact word it was cut off at was considered — rejected: it composes a fresh **Reply** knowing it was talked over, which is what someone picking a point back up actually does.
 - "Turns" could mean rounds where everyone speaks once — resolved: a **Turn** is one **Reply**, and `--turns` counts **Replies**, not rounds.

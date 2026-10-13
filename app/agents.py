@@ -134,6 +134,61 @@ def _rate_eagerness(api: str, base_url: str, model: str, api_key: str, personas,
     return eagerness
 
 
+NO_LANGUAGE = {"none", "no", "na", "any", "unspecified", "unknown", "nothing", "not"}
+
+
+def _named_in(language: str, mood: str) -> bool:
+    """Is this language actually named in the mood?
+
+    The model reading the moods is free with them: asked which language a Serbian nationalist writes,
+    a small one answers Croatian, and it hands a language to characters whose mood says nothing about
+    one. A mood that does not name the language cannot have asked for it, whatever the answer says.
+    """
+    return any(word[:4].lower() in mood.lower() for word in language.split())
+
+
+def _read_languages(api: str, base_url: str, model: str, api_key: str, personas,
+                    max_tokens: int) -> dict[str, str | None]:
+    """Read from each persona's mood which language it writes in, or None where the mood is silent.
+
+    One request before the conversation starts, so that every turn can be told its language outright
+    instead of hoping the model picks it out of a long mood. If the answer cannot be read, no persona
+    gets a language and the mood has to carry it alone.
+    """
+    described = "\n".join(f"{name}: {mood}" for name, mood, _ in personas)
+    question = (
+        "Each of these characters has a description. Which language does the description tell the "
+        f"character to speak or write in?\n\n{described}\n\n"
+        'Answer "none" unless the description actually says to speak or write a language. Where a '
+        "character is from, or which people they belong to, is not such an instruction: a Croatian "
+        'nationalist with nothing said about language is "none".\n'
+        'Answer with one line per character, "NAME: LANGUAGE" or "NAME: none", naming the language '
+        "in English and writing nothing else."
+    )
+    try:
+        answer = _complete(api, base_url, model, api_key, RATER_PROMPT,
+                           [{"role": "user", "content": question}], max_tokens)
+    except (OSError, RuntimeError) as error:
+        print(f"Warning: cannot read which language the agents speak ({error}); "
+              "leaving that to their moods", file=sys.stderr, flush=True)
+        return {name: None for name, _, _ in personas}
+
+    languages = {}
+    for name, mood, _ in personas:
+        found = re.search(rf"^\W*{re.escape(name)}\W*:\s*(.+)$", answer, re.IGNORECASE | re.MULTILINE)
+        # Models pad the line they were asked for: "Milorad: Serbian", "English: English", or the
+        # name back with a typo. Whatever label they repeat, the language follows the last colon.
+        spoken = found[1].rsplit(":", 1)[-1] if found else ""
+        # A language is a word or two ("Serbian", "Brazilian Portuguese"), never a sentence.
+        words = [word for word in spoken.strip(" .*_\"'").split() if word.isalpha()]
+        named = words[0].lower() if words else ""
+        answered = " ".join(words[:2]) if named and named not in NO_LANGUAGE else None
+        if answered and (answered.isupper() or answered.islower()):
+            answered = answered.title()  # Models answer "SERBIAN" as readily as "Serbian".
+        languages[name] = answered if answered and _named_in(answered, mood) else None
+    return languages
+
+
 async def _receive_type(socket, expected: str) -> dict:
     while True:
         event = json.loads(await socket.recv())
@@ -150,16 +205,17 @@ async def _send_text(socket, text: str, turn: int) -> None:
 
 def _system_prompt(name: str, mood: str, others: list[tuple[str, str]], subject: str, read_aloud: bool = False,
                    addressed_by: str | None = None, closing: bool = False, brief: bool = False,
-                   interrupting: str | None = None, cut_off_by: str | None = None) -> str:
+                   interrupting: str | None = None, cut_off_by: str | None = None,
+                   language: str | None = None) -> str:
     people = ", ".join(f"{other} ({other_mood})" for other, other_mood in others)
     prompt = (
         f"You are {name}, one of several AI agents having a natural group conversation. "
-        f"The others are {people}. The subject is: {subject}. Your personality is: {mood}. "
+        f"The others are {people}. The subject is: {subject}. "
+        f"This is who you are, and you follow it exactly: {mood}. "
         "Respond to what the group has said and add a thought of your own. Usually you speak to the whole group; "
         "if you want one particular person to answer, call on them by name. "
         "Write only what you say, without a name label in front. "
-        "Do not repeat points just to fill space. Use informal and very simple language."
-        
+        "Do not repeat points just to fill space. Keep your wording informal and very simple."
     )
     if brief:
         prompt += " Keep this reply very short: a few words or one sentence, like a quick reaction."
@@ -180,6 +236,14 @@ def _system_prompt(name: str, mood: str, others: list[tuple[str, str]], subject:
                    "pick your point back up.")
     if closing:
         prompt += " This is the last reply of the conversation: bring it to a natural close and do not ask anyone anything."
+    # Last, because this is the instruction a reply drifts away from: everything the persona reads is
+    # in the language the others happen to use, and a model follows the conversation it is given.
+    if language:
+        prompt += (f" Write this reply in {language}, whatever language the others are using, "
+                   "and do not add a translation.")
+    else:
+        prompt += (" If you are told to speak a particular language, write every reply in that language, "
+                   "even when the others write in a different one, and never add a translation.")
     return prompt
 
 
@@ -313,7 +377,8 @@ def _speaker(args: argparse.Namespace, personas: list[tuple[str, str, str | None
     if shared:
         print(f"Warning: personas share voices: {', '.join(shared)}", file=sys.stderr, flush=True)
     return Speaker(
-        SpeechEngine(args.tts_base_url, args.tts_model, args.tts_api_key, args.tts_speed),
+        SpeechEngine(args.tts_base_url, args.tts_model, args.tts_api_key, args.tts_speed,
+                     args.tts_format),
         PulsePlayer(args.tts_sample_rate),
         voices,
     )
@@ -339,6 +404,14 @@ async def run_conversation(args: argparse.Namespace) -> str:
             raise RuntimeError("--tts-sample-rate must be a positive number of hertz")
         speaker = _speaker(args, personas)
         await asyncio.to_thread(speaker.check)
+
+    languages = await asyncio.to_thread(
+        _read_languages, args.llm_api, args.llm_base_url, args.model, args.llm_api_key, personas,
+        args.llm_max_tokens,
+    )
+    if spoken := {name: language for name, language in languages.items() if language}:
+        print("Languages: " + ", ".join(f"{name} {language}" for name, language in spoken.items()),
+              flush=True)
 
     eagerness = None
     if args.interruptions:
@@ -389,7 +462,7 @@ async def run_conversation(args: argparse.Namespace) -> str:
                 args.llm_api_key,
                 _system_prompt(
                     name, mood, others, args.subject, args.read_aloud, addressed_by, closing, brief,
-                    interrupting, cut_off_by,
+                    interrupting, cut_off_by, languages.get(name),
                 ),
                 list(history),
                 args.llm_max_tokens,
@@ -442,6 +515,8 @@ def parse_args() -> argparse.Namespace:
                         help="How quickly the voices speak, 0.25 to 4.0 (default: 1.1)")
     parser.add_argument("--tts-sample-rate", type=int, default=int(os.getenv("TTS_SAMPLE_RATE") or 24000),
                         help="Sample rate in hertz of the speech endpoint's raw audio (default: 24000)")
+    parser.add_argument("--tts-format", choices=("pcm", "wav"), default=os.getenv("TTS_FORMAT") or "pcm",
+                        help="What to ask the speech endpoint for; wav is for engines that cannot do pcm")
     args = parser.parse_args()
     defaults = API_DEFAULTS[args.llm_api]
     args.llm_base_url = args.llm_base_url or defaults["base_url"]

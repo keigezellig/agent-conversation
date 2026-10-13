@@ -5,7 +5,8 @@ import urllib.error
 import pytest
 
 from app import agents
-from app.agents import ANTHROPIC_VERSION, DEFAULT_EAGERNESS, EAGERNESS_SCALE, _complete, _rate_eagerness, parse_args
+from app.agents import (ANTHROPIC_VERSION, DEFAULT_EAGERNESS, EAGERNESS_SCALE, _complete,
+                        _rate_eagerness, _read_languages, parse_args)
 
 SYSTEM = "You are Mira, one of several AI agents."
 HISTORY = [{"role": "user", "content": "Start a conversation."}, {"role": "assistant", "content": "Cars."}]
@@ -163,6 +164,76 @@ def test_a_failed_rating_falls_back_to_the_middle_without_ending_the_run(monkeyp
         "Sol": DEFAULT_EAGERNESS,
     }
     assert "cannot rate how readily the agents interrupt" in capsys.readouterr().err
+
+
+MIXED = [("Santa", "a talk show host who keeps neutral", None),
+         ("Milorad", "a serbian nationalist who writes Serbian answers, arrogant", None)]
+
+
+def _languages(answer, monkeypatch, personas=MIXED):
+    _answering({"choices": [{"message": {"content": answer}}]}, monkeypatch)
+    return _read_languages("openai", "http://model/v1", "m", "", personas, 1024)
+
+
+def test_a_language_named_in_a_mood_is_read_and_the_silent_mood_is_left_alone(monkeypatch):
+    assert _languages("Santa: none\nMilorad: Serbian", monkeypatch) == {"Santa": None, "Milorad": "Serbian"}
+
+
+@pytest.mark.parametrize("answer", [
+    # All three seen from a small model answering "NAME: LANGUAGE" a little too literally.
+    "Santa: Santa: none\nMilorad: Milorad: Serbian",
+    "Santa: none: none\nMilorad: Serbian: Serbian",
+    "Santa: none\nMilorad: Mirorad: Serbian",
+])
+def test_a_label_echoed_into_the_answer_is_not_mistaken_for_the_language(answer, monkeypatch):
+    assert _languages(answer, monkeypatch) == {"Santa": None, "Milorad": "Serbian"}
+
+
+def test_a_shouted_or_lowercase_language_is_tidied_before_it_reaches_a_prompt(monkeypatch):
+    assert _languages("Santa: NONE\nMilorad: SERBIAN", monkeypatch)["Milorad"] == "Serbian"
+    assert _languages("Santa: none\nMilorad: serbian", monkeypatch)["Milorad"] == "Serbian"
+
+
+def test_a_wordy_refusal_is_still_no_language(monkeypatch):
+    assert _languages("Santa: none (nothing is said)\nMilorad: Serbian", monkeypatch)["Santa"] is None
+
+
+def test_a_language_the_mood_never_names_is_thrown_away(monkeypatch):
+    # Both of these came back from a small model reading the same two moods.
+    assert _languages("Santa: English\nMilorad: Serbian", monkeypatch) == {"Santa": None, "Milorad": "Serbian"}
+    assert _languages("Santa: none\nMilorad: Croatian", monkeypatch) == {"Santa": None, "Milorad": None}
+
+
+def test_the_question_rules_out_inferring_a_language_from_nationality(monkeypatch):
+    sent = _answering({"choices": [{"message": {"content": "Santa: none\nMilorad: Serbian"}}]}, monkeypatch)
+    _read_languages("openai", "http://model/v1", "m", "", MIXED, 1024)
+    asked = sent["body"]["messages"][-1]["content"]
+    assert "is not such an instruction" in asked and "nationalist with nothing said about language" in asked
+
+
+def test_a_two_word_language_survives_but_a_whole_sentence_does_not(monkeypatch):
+    personas = [("Santa", "a talk show host who keeps neutral", None),
+                ("Joao", "cheerful, writes Brazilian Portuguese answers", None)]
+    answer = "Santa: none\nJoao: Brazilian Portuguese because the description says so"
+    assert _languages(answer, monkeypatch, personas)["Joao"] == "Brazilian Portuguese"
+
+
+@pytest.mark.parametrize("said", ["none", "None.", "n/a", "any", "**none**"])
+def test_ways_of_saying_no_language_all_mean_none(said, monkeypatch):
+    assert _languages(f"Santa: {said}\nMilorad: {said}", monkeypatch) == {"Santa": None, "Milorad": None}
+
+
+def test_an_unreadable_answer_leaves_every_language_to_the_mood(monkeypatch):
+    assert _languages("I am not sure what you mean.", monkeypatch) == {"Santa": None, "Milorad": None}
+
+
+def test_a_failed_language_request_does_not_end_the_run(monkeypatch, capsys):
+    _failing(500, "boom", monkeypatch)
+    assert _read_languages("openai", "http://model/v1", "m", "", MIXED, 1024) == {
+        "Santa": None,
+        "Milorad": None,
+    }
+    assert "cannot read which language" in capsys.readouterr().err
 
 
 def _args(monkeypatch, *argv, **environment):
