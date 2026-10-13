@@ -89,6 +89,42 @@ Repeat `--agent "NAME|MOOD"` for every participant (a mood cannot contain `|`); 
 
 The first agent listed opens. Each agent knows the others' names and moods. When a reply calls on someone by name ("Sol, …" or "…, what do you think, Dave?"), that agent answers next; a name merely mentioned ("what Mira said") or used to acknowledge someone before moving on ("Great point, Mira. Anyway, …") does not count. Otherwise the next speaker is picked at random, never the one who just spoke, with better odds for whoever has been silent longest, so an agent nobody calls on may stay quiet. Pass `--seed N` to make those picks repeatable. The agent taking the last turn is asked to bring the conversation to a close.
 
+### Letting the agents interrupt each other
+
+With `--interruptions`, an agent can cut another one off mid-sentence. Pushy moods cut in more often than patient ones, so the flag shows best with a cast that has a range of them:
+
+```bash
+docker compose --profile agents run --build --rm agent-chat \
+  --subject "Whether cities should ban private cars" \
+  --agent "Santa|a talk show host keeping order" \
+  --agent "Richard|arrogant and takes no criticism" \
+  --agent "Dan|aggressive and childish" \
+  --agent "Joyce|annoyingly happy and off-topic" \
+  --interruptions \
+  --turns 12
+```
+
+The run opens with the rating the model gave each mood, and then the conversation:
+
+```
+Eagerness to interrupt: Santa 1/4, Richard 3/4, Dan 4/4, Joyce 2/4
+Conversation 7c1f0f1e-… | Subject: Whether cities should ban private cars
+Santa (a talk show host keeping order): Welcome back everyone. Richard, you wanted to start?
+Richard (arrogant and takes no criticism): I have said this a hundred times and nobody here—
+Dan (aggressive and childish): Rubbish, you always do this!
+Richard (arrogant and takes no criticism): As I was saying, before I was so rudely cut off, …
+```
+
+Everything else stays the same, so `--interruptions` combines with `--read-aloud`, `--seed`, and either model provider.
+
+The interrupted reply stops where it was cut off, on a dash. That shortened reply is all anyone gets: it is what the runner prints, what it speaks with `--read-aloud`, and what the other agents are told was said, so nobody answers a point they never heard — including a question in the part that was cut. The agent who cut in takes the turn, is told whose sentence it is cutting into, and is asked to keep it short; the agent who was cut off usually gets the floor back on the turn after, and is told it was talked over.
+
+The ratings are where the frequency comes from: before the conversation starts, the runner asks the model to judge each mood from 0 ("always waits their turn") to 4 ("talks over everyone"). Every agent but the one speaking then gets its own chance to cut in on each reply, so pushier moods interrupt more often and a bigger group is interrupted more often: three calm agents cut in on about one reply in twelve, five pushy ones on about half. Mood is the only thing that decides this — it never changes an agent's odds in the random pick or how long its replies are.
+
+Three turns are never cut short: the opening one, the closing one, and a reply that is itself an interruption. The last of those keeps two pushy agents from cutting each other off turn after turn, which otherwise leaves the conversation without a single finished thought. A reply of a few words is over before anyone can get in, so it stands as well.
+
+This costs one extra model request per run, for the ratings. If that request fails, the runner warns and gives every agent the middle rating rather than giving up on the conversation.
+
 ### Model providers
 
 The runner speaks two model APIs, chosen with `LLM_API` (or `--llm-api`):
@@ -145,7 +181,7 @@ docker compose --profile agents run --build --rm -e ANTHROPIC_API_KEY agent-chat
   --turns 9
 ```
 
-Each turn is one request, so `--turns 9` makes nine calls regardless of how many personas there are. The runner checks the key before it creates the conversation, so a missing or wrong one fails immediately rather than part-way through. Read-aloud works the same with either provider: Claude writes the replies and the local speech engine voices them.
+Each turn is one request, so `--turns 9` makes nine calls regardless of how many personas there are, plus one for the ratings with `--interruptions`. The runner checks the key before it creates the conversation, so a missing or wrong one fails immediately rather than part-way through. Read-aloud works the same with either provider: Claude writes the replies and the local speech engine voices them.
 
 Only the persona replies go to the model provider; the bridge itself never talks to one.
 
@@ -154,6 +190,8 @@ Only the persona replies go to the model provider; the bridge itself never talks
 With `--read-aloud`, the runner speaks each reply as it is shown, giving every agent its own voice. The next agent composes its reply while the current one is speaking, so there is little silence between replies. Playback is live on the host's speakers through PulseAudio or PipeWire (Linux); there is no recording.
 
 A reply is spoken in sentence-sized pieces rather than all at once: it starts being heard as soon as its first sentence is ready, while the rest is still being synthesized. On a CPU speech engine this is the difference between a few seconds of silence before each reply and almost none.
+
+Add `--interruptions` and an agent that is cut off is heard breaking off mid-sentence, with the next voice coming straight in. Voices are still never spoken over each other: the interruption is in the words, not in overlapping audio.
 
 Start the optional local speech engine (Kokoro, CPU-only) and add the `TTS_*` settings from `.env.example` to `.env`:
 

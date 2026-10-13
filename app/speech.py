@@ -29,7 +29,8 @@ _LINE_MARKER = re.compile(r"^[ \t]*(?:#+|[-*+]|\d+[.)])[ \t]+", re.MULTILINE)
 _EMPHASIS = re.compile(r"\*+|`+|~~|(?<!\w)_+|_+(?!\w)")
 _EMOJI = re.compile("[\U0001F000-\U0001FAFF☀-➿️‍]")
 _SPACED_PUNCTUATION = re.compile(r"\s+(?=[.,;:!?…])")
-_ENDS_SENTENCE = re.compile(r"[.!?…][\"'’”)\]]*$")
+# A dash ends a line that was cut off by an interruption; it needs no full stop adding.
+_ENDS_SENTENCE = re.compile(r"[.!?…—–][\"'’”)\]]*$")
 _SENTENCE = re.compile(r"[^.!?…]*[.!?…]+[\"'’”)\]]*\s*|[^.!?…]+$")
 
 

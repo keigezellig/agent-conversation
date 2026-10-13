@@ -6,6 +6,7 @@ from contextlib import AsyncExitStack
 import json
 import os
 import random
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -14,7 +15,8 @@ from urllib.parse import quote
 import websockets
 
 from .speech import DEFAULT_VOICES, PulsePlayer, SpeechEngine, Speaker, assign_voices
-from .turns import addressee, pick_next, without_label
+from .turns import (DEFAULT_EAGERNESS, EAGERNESS_SCALE, FLOOR_BACK, addressee, cut_off, pick_interrupter,
+                    pick_next, without_label)
 
 
 def _http_json(url: str, token: str, payload: dict) -> dict:
@@ -101,6 +103,37 @@ def _complete(api: str, base_url: str, model: str, api_key: str, system: str, hi
     return content.strip()
 
 
+RATER_PROMPT = "You rate characters for a group conversation. Judge only from the personality given."
+
+
+def _rate_eagerness(api: str, base_url: str, model: str, api_key: str, personas,
+                    max_tokens: int) -> dict[str, int]:
+    """Rate from each persona's mood how readily it cuts the others off, 0 to EAGERNESS_SCALE.
+
+    One request before the conversation starts. A rating that cannot be read falls back to the middle,
+    so an unhelpful answer costs some realism but never the run.
+    """
+    described = "\n".join(f"{name}: {mood}" for name, mood, _ in personas)
+    question = (
+        f"How readily does each of these characters cut someone off mid-sentence?\n\n{described}\n\n"
+        f"Rate each one from 0 (always waits their turn) to {EAGERNESS_SCALE} (talks over everyone). "
+        'Answer with one line per character, "NAME: NUMBER", and nothing else.'
+    )
+    try:
+        answer = _complete(api, base_url, model, api_key, RATER_PROMPT,
+                           [{"role": "user", "content": question}], max_tokens)
+    except (OSError, RuntimeError) as error:
+        print(f"Warning: cannot rate how readily the agents interrupt ({error}); "
+              f"using {DEFAULT_EAGERNESS} for everyone", file=sys.stderr, flush=True)
+        return {name: DEFAULT_EAGERNESS for name, _, _ in personas}
+
+    eagerness = {}
+    for name, _, _ in personas:
+        rated = re.search(rf"^\W*{re.escape(name)}[^\d\n]*(\d+)", answer, re.IGNORECASE | re.MULTILINE)
+        eagerness[name] = min(int(rated[1]), EAGERNESS_SCALE) if rated else DEFAULT_EAGERNESS
+    return eagerness
+
+
 async def _receive_type(socket, expected: str) -> dict:
     while True:
         event = json.loads(await socket.recv())
@@ -116,7 +149,8 @@ async def _send_text(socket, text: str, turn: int) -> None:
 
 
 def _system_prompt(name: str, mood: str, others: list[tuple[str, str]], subject: str, read_aloud: bool = False,
-                   addressed_by: str | None = None, closing: bool = False, brief: bool = False) -> str:
+                   addressed_by: str | None = None, closing: bool = False, brief: bool = False,
+                   interrupting: str | None = None, cut_off_by: str | None = None) -> str:
     people = ", ".join(f"{other} ({other_mood})" for other, other_mood in others)
     prompt = (
         f"You are {name}, one of several AI agents having a natural group conversation. "
@@ -125,6 +159,7 @@ def _system_prompt(name: str, mood: str, others: list[tuple[str, str]], subject:
         "if you want one particular person to answer, call on them by name. "
         "Write only what you say, without a name label in front. "
         "Do not repeat points just to fill space. Use informal and very simple language."
+        
     )
     if brief:
         prompt += " Keep this reply very short: a few words or one sentence, like a quick reaction."
@@ -137,6 +172,12 @@ def _system_prompt(name: str, mood: str, others: list[tuple[str, str]], subject:
         )
     if addressed_by:
         prompt += f" {addressed_by} just asked you directly; answer them."
+    if interrupting:
+        prompt += (f" You are cutting {interrupting} off mid-sentence, before they are done talking: "
+                   "butt straight in with your reaction and do not be polite about it.")
+    if cut_off_by:
+        prompt += (f" {cut_off_by} just talked over you and cut you off mid-sentence; "
+                   "pick your point back up.")
     if closing:
         prompt += " This is the last reply of the conversation: bring it to a natural close and do not ask anyone anything."
     return prompt
@@ -171,12 +212,17 @@ def _personas(args: argparse.Namespace) -> list[tuple[str, str, str | None]]:
 BRIEF_SHARE = 1 / 3
 
 
-async def _take_turns(personas, turns: int, compose, relay, speaker=None, show=print, rng=None) -> None:
+async def _take_turns(personas, turns: int, compose, relay, speaker=None, show=print, rng=None,
+                      eagerness: dict[str, int] | None = None) -> None:
     """Have personas take turns, showing each reply and reading it aloud when a speaker is given.
 
     The first persona opens. Whoever a reply calls on by name speaks next; otherwise the next persona
     is picked at random, favouring the longest silent. The last turn closes the conversation.
     About a third of the other unaddressed turns ask for a brief reply.
+    With an eagerness rating per persona, any turn but the opening, the closing one, and one that is
+    itself a cut-in may be cut off by a persona butting in: the reply is cut short mid-sentence and
+    only that much is shown, spoken, and relayed, the interrupter takes the next turn, and the persona
+    who was cut off usually takes the one after that to pick its point back up.
     A reply is shown when it starts being spoken. The next reply may be composed while the current
     one is spoken, but composing never runs more than one reply ahead of what has been heard.
     A reply starts being spoken as soon as its opening piece is synthesized, not when all of it is.
@@ -188,17 +234,41 @@ async def _take_turns(personas, turns: int, compose, relay, speaker=None, show=p
     lookahead = asyncio.Semaphore(1)
 
     async def produce() -> None:
-        name, addressed_by, last_turns = names[0], None, {}
+        name, addressed_by, interrupting, cut_off_by, last_turns = names[0], None, None, None, {}
         for turn in range(turns):
             mood = moods[name]
             closing = turn == turns - 1
-            brief = turn > 0 and not closing and not addressed_by and rng.random() < BRIEF_SHARE
+            # Butting in is a quick reaction by nature, so an interrupter always gets the brief prompt.
+            brief = bool(interrupting) or (
+                turn > 0 and not closing and not addressed_by and not cut_off_by
+                and rng.random() < BRIEF_SHARE
+            )
             await lookahead.acquire()
-            text = without_label(await compose(turn, name, mood, addressed_by, closing, brief), names)
+            text = without_label(
+                await compose(turn, name, mood, addressed_by, closing, brief, interrupting, cut_off_by),
+                names,
+            )
+            interrupter, heard = None, None
+            # A reply that is itself a cut-in is heard out: otherwise two pushy personas cut each
+            # other off turn after turn and the conversation never gets a finished sentence in.
+            if eagerness and turn > 0 and not closing and not interrupting:
+                interrupter = pick_interrupter(name, names, eagerness, rng)
+                heard = cut_off(text, rng) if interrupter else None
+                # A reply too short to cut was over before anyone could get a word in.
+                interrupter = interrupter if heard else None
+            text = heard or text
             await relay(turn, name, text)
             last_turns[name] = turn
-            called_on = addressee(text, name, names)
-            next_name = called_on or pick_next(name, names, last_turns, rng)
+            # An interrupter takes the floor uninvited, so nobody this reply called on gets it.
+            called_on = None if interrupter else addressee(text, name, names)
+            if interrupter:
+                next_name = interrupter
+            elif called_on:
+                next_name = called_on
+            elif interrupting and rng.random() < FLOOR_BACK:
+                next_name = interrupting  # the persona cut off here usually gets the floor back
+            else:
+                next_name = pick_next(name, names, last_turns, rng)
             clip, problem = None, None
             if speaker:
                 try:
@@ -206,7 +276,13 @@ async def _take_turns(personas, turns: int, compose, relay, speaker=None, show=p
                 except (OSError, RuntimeError) as error:
                     problem = str(error) or type(error).__name__
             await ready.put((name, mood, text, clip, problem))
-            name, addressed_by = next_name, called_on and name
+            if interrupter:
+                addressed_by, interrupting, cut_off_by = None, name, None
+            elif next_name == interrupting:
+                addressed_by, interrupting, cut_off_by = None, None, name
+            else:
+                addressed_by, interrupting, cut_off_by = (name if called_on else None), None, None
+            name = next_name
         await ready.put(None)
 
     async def present() -> None:
@@ -264,6 +340,16 @@ async def run_conversation(args: argparse.Namespace) -> str:
         speaker = _speaker(args, personas)
         await asyncio.to_thread(speaker.check)
 
+    eagerness = None
+    if args.interruptions:
+        eagerness = await asyncio.to_thread(
+            _rate_eagerness, args.llm_api, args.llm_base_url, args.model, args.llm_api_key, personas,
+            args.llm_max_tokens,
+        )
+        print("Eagerness to interrupt: "
+              + ", ".join(f"{name} {rating}/{EAGERNESS_SCALE}" for name, rating in eagerness.items()),
+              flush=True)
+
     room = await asyncio.to_thread(
         _create_conversation,
         args.bridge_url,
@@ -286,7 +372,8 @@ async def run_conversation(args: argparse.Namespace) -> str:
         await asyncio.gather(*(_receive_type(sockets[name], "ready") for name in names))
 
         async def compose(turn: int, name: str, mood: str, addressed_by: str | None, closing: bool,
-                          brief: bool) -> str:
+                          brief: bool, interrupting: str | None = None,
+                          cut_off_by: str | None = None) -> str:
             others = [(other, other_mood) for other, other_mood, _ in personas if other != name]
             history = histories[name]
             if not history:
@@ -301,7 +388,8 @@ async def run_conversation(args: argparse.Namespace) -> str:
                 args.model,
                 args.llm_api_key,
                 _system_prompt(
-                    name, mood, others, args.subject, args.read_aloud, addressed_by, closing, brief
+                    name, mood, others, args.subject, args.read_aloud, addressed_by, closing, brief,
+                    interrupting, cut_off_by,
                 ),
                 list(history),
                 args.llm_max_tokens,
@@ -319,7 +407,8 @@ async def run_conversation(args: argparse.Namespace) -> str:
                 _append_history(histories[peer], "user", f"{name}: {delivered['payload']['text']}")
 
         await _take_turns(personas, args.turns, compose, relay, speaker,
-                          show=lambda line: print(line, flush=True), rng=random.Random(args.seed))
+                          show=lambda line: print(line, flush=True), rng=random.Random(args.seed),
+                          eagerness=eagerness)
 
     return room["id"]
 
@@ -330,6 +419,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--agent", dest="agent_specs", action="append", help="Agent persona as NAME|MOOD or NAME|MOOD|VOICE; repeat for each agent")
     parser.add_argument("--turns", type=int, default=8, help="Number of replies to generate (default: 8)")
     parser.add_argument("--seed", type=int, help="Seed for picking who speaks next when nobody is called on")
+    parser.add_argument("--interruptions", action="store_true",
+                        help="Let the agents cut each other off mid-sentence, the pushier moods more often")
     parser.add_argument("--bridge-url", default=os.getenv("AGENT_BRIDGE_URL", "http://localhost:8080"))
     parser.add_argument("--api-token", default=os.getenv("API_TOKEN", ""))
     parser.add_argument("--llm-api", choices=tuple(API_DEFAULTS), default=os.getenv("LLM_API") or "openai",

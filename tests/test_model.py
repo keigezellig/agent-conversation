@@ -5,7 +5,7 @@ import urllib.error
 import pytest
 
 from app import agents
-from app.agents import ANTHROPIC_VERSION, _complete, parse_args
+from app.agents import ANTHROPIC_VERSION, DEFAULT_EAGERNESS, EAGERNESS_SCALE, _complete, _rate_eagerness, parse_args
 
 SYSTEM = "You are Mira, one of several AI agents."
 HISTORY = [{"role": "user", "content": "Start a conversation."}, {"role": "assistant", "content": "Cars."}]
@@ -128,6 +128,41 @@ def test_an_empty_openai_reply_is_an_error(monkeypatch):
     _answering({"choices": [{"message": {"content": "  "}}]}, monkeypatch)
     with pytest.raises(RuntimeError, match="empty response"):
         _complete("openai", "http://model/v1", "m", "k", SYSTEM, HISTORY, 1024)
+
+
+PERSONAS = [("Mira", "curious and optimistic", None), ("Sol", "loud and never lets anyone finish", None)]
+
+
+def _rate(answer, monkeypatch):
+    sent = _answering({"choices": [{"message": {"content": answer}}]}, monkeypatch)
+    rated = _rate_eagerness("openai", "http://model/v1", "m", "", PERSONAS, 1024)
+    return rated, sent
+
+
+def test_each_mood_is_rated_for_how_readily_it_interrupts(monkeypatch):
+    rated, sent = _rate("Mira: 1\nSol: 4", monkeypatch)
+    assert rated == {"Mira": 1, "Sol": 4}
+    asked = sent["body"]["messages"][-1]["content"]
+    assert "never lets anyone finish" in asked and f"0 (always waits their turn) to {EAGERNESS_SCALE}" in asked
+
+
+def test_a_rating_is_read_out_of_a_wordier_answer_and_capped(monkeypatch):
+    rated, _ = _rate("Here you go:\n- **Mira** - 2 (she listens)\nSol: 9/10, talks over everyone", monkeypatch)
+    assert rated == {"Mira": 2, "Sol": EAGERNESS_SCALE}
+
+
+def test_a_persona_the_rating_skips_gets_the_middle_rating(monkeypatch):
+    rated, _ = _rate("Sol: 3\nI cannot rate the other one.", monkeypatch)
+    assert rated == {"Mira": DEFAULT_EAGERNESS, "Sol": 3}
+
+
+def test_a_failed_rating_falls_back_to_the_middle_without_ending_the_run(monkeypatch, capsys):
+    _failing(429, '{"error":{"message":"rate limited"}}', monkeypatch)
+    assert _rate_eagerness("openai", "http://model/v1", "m", "", PERSONAS, 1024) == {
+        "Mira": DEFAULT_EAGERNESS,
+        "Sol": DEFAULT_EAGERNESS,
+    }
+    assert "cannot rate how readily the agents interrupt" in capsys.readouterr().err
 
 
 def _args(monkeypatch, *argv, **environment):

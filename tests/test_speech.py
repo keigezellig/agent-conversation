@@ -27,6 +27,11 @@ def test_speakable_keeps_terminal_punctuation_behind_a_quote():
     assert speakable('He said "no."\nSo we waited.', "Mira") == 'He said "no." So we waited.'
 
 
+def test_a_reply_cut_off_by_an_interruption_is_not_given_a_full_stop():
+    assert speakable("I have said this before and—", "Mira") == "I have said this before and—"
+    assert pieces("I have said this before and—") == ["I have said this before and—"]
+
+
 OPENING = "I think the whole idea of banning private cars deserves a proper look."
 
 

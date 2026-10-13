@@ -48,10 +48,12 @@ class Recorder:
         with self.lock:
             self.events.append(event)
 
-    async def compose(self, turn, name, mood, addressed_by=None, closing=False, brief=False):
+    async def compose(self, turn, name, mood, addressed_by=None, closing=False, brief=False,
+                      interrupting=None, cut_off_by=None):
         self.log("compose", turn + 1, self.finished)
         self.log("turn", name, addressed_by, closing)
         self.log("brief", brief)
+        self.log("cutting", interrupting, cut_off_by)
         await asyncio.sleep(0)
         return self.scripted.get(turn + 1, f"reply {turn + 1}")
 
@@ -77,10 +79,10 @@ class Recorder:
         self.log("show", line)
 
 
-def _run(recorder, turns, speaker=True, personas=PERSONAS, rng=None):
+def _run(recorder, turns, speaker=True, personas=PERSONAS, rng=None, eagerness=None):
     asyncio.run(_take_turns(
         personas, turns, recorder.compose, recorder.relay,
-        recorder if speaker else None, show=recorder.show, rng=rng,
+        recorder if speaker else None, show=recorder.show, rng=rng, eagerness=eagerness,
     ))
 
 
@@ -144,7 +146,8 @@ def test_without_a_speaker_replies_are_only_shown():
 def test_compose_failure_ends_the_conversation():
     recorder = Recorder()
 
-    async def broken_compose(turn, name, mood, addressed_by=None, closing=False, brief=False):
+    async def broken_compose(turn, name, mood, addressed_by=None, closing=False, brief=False,
+                             interrupting=None, cut_off_by=None):
         raise RuntimeError("model endpoint returned an empty response")
 
     with pytest.raises(RuntimeError, match="empty response"):
@@ -221,9 +224,125 @@ def test_system_prompt_marks_a_direct_question_and_the_closing_turn():
     assert "asked you directly" not in plain and "last reply" not in plain
 
 
+class Interrupting:
+    """Fake rng that lets every eager persona cut in, cuts replies as early as allowed, and picks first.
+
+    `rolls` scripts the rolls one by one, for tests that need a particular one to fail; once it runs
+    out, every roll comes out as `roll`.
+    """
+
+    def __init__(self, roll=0.0, rolls=()):
+        self.roll = roll
+        self.rolls = list(rolls)
+
+    def random(self):
+        return self.rolls.pop(0) if self.rolls else self.roll
+
+    def randint(self, low, high):
+        return low
+
+    def choices(self, population, weights):
+        return [population[0]]
+
+
+EAGER_DAVE = {"Mira": 0, "Sol": 0, "Dave": 4}
+SPEECHES = {
+    1: "Cars are loud and I think the city should ban them for good.",
+    2: "Honestly I have heard that one before and it never gets better.",
+}
+
+
+def _relayed(recorder):
+    return [event[1] for event in recorder.events if event[0] == "show"]
+
+
+def test_an_eager_persona_cuts_a_reply_short_and_takes_the_turn():
+    recorder = Recorder(play_seconds=0)
+    recorder.scripted = dict(SPEECHES)
+    _run(recorder, 4, speaker=False, personas=TRIO, rng=Interrupting(), eagerness=EAGER_DAVE)
+    assert [name for name, _, _ in _turns(recorder)] == ["Mira", "Sol", "Dave", "Sol"]
+    assert _relayed(recorder)[1] == "Sol (skeptical): Honestly I have heard—"
+    assert "never gets better" not in " ".join(_relayed(recorder))
+
+
+def test_the_interrupter_is_told_who_it_cuts_off_and_cuts_in_briefly():
+    recorder = Recorder(play_seconds=0)
+    recorder.scripted = dict(SPEECHES)
+    _run(recorder, 4, speaker=False, personas=TRIO, rng=Interrupting(), eagerness=EAGER_DAVE)
+    cutting = [event[1:] for event in recorder.events if event[0] == "cutting"]
+    assert cutting == [(None, None), (None, None), ("Sol", None), (None, "Dave")]
+    assert [event[1] for event in recorder.events if event[0] == "brief"][2] is True
+
+
+# The rolls of a run where Dave cuts Sol off on the second turn: Sol's brief roll, then one roll per
+# persona that might cut in on Sol, Mira before Dave. Dave's own cut-in is heard out, so the next
+# roll is the floor-back one.
+BEFORE_FLOOR_BACK = [0.9, 0.9, 0.0]
+
+
+@pytest.mark.parametrize("floor_back, expected", [(0.5, "Sol"), (0.9, "Mira")])
+def test_the_persona_that_was_cut_off_usually_gets_the_floor_back(floor_back, expected):
+    recorder = Recorder(play_seconds=0)
+    recorder.scripted = dict(SPEECHES)
+    rng = Interrupting(roll=0.9, rolls=[*BEFORE_FLOOR_BACK, floor_back])
+    _run(recorder, 4, speaker=False, personas=TRIO, rng=rng, eagerness=EAGER_DAVE)
+    assert [name for name, _, _ in _turns(recorder)] == ["Mira", "Sol", "Dave", expected]
+
+
+def test_a_reply_too_short_to_cut_is_not_interrupted():
+    recorder = Recorder(play_seconds=0)
+    recorder.scripted = {1: SPEECHES[1], 2: "No."}
+    _run(recorder, 3, speaker=False, personas=TRIO, rng=Interrupting(), eagerness=EAGER_DAVE)
+    assert _relayed(recorder)[1] == "Sol (skeptical): No."
+    assert [name for name, _, _ in _turns(recorder)] == ["Mira", "Sol", "Mira"]
+
+
+def test_an_interrupter_takes_the_floor_from_the_persona_the_reply_called_on():
+    recorder = Recorder(play_seconds=0)
+    recorder.scripted = {1: SPEECHES[1], 2: "That is just wrong, Dave, what would you do about it?"}
+    eagerness = {"Mira": 4, "Sol": 0, "Dave": 0}
+    _run(recorder, 3, speaker=False, personas=TRIO, rng=Interrupting(), eagerness=eagerness)
+    assert _turns(recorder)[2] == ("Mira", None, True)
+
+
+def test_the_opening_and_closing_turns_are_never_cut_short():
+    recorder = Recorder(play_seconds=0)
+    recorder.scripted = {1: SPEECHES[1], 2: SPEECHES[2], 3: SPEECHES[1]}
+    eagerness = {name: 4 for name, _, _ in TRIO}
+    _run(recorder, 3, speaker=False, personas=TRIO, rng=Interrupting(), eagerness=eagerness)
+    shown = _relayed(recorder)
+    assert shown[0].endswith(SPEECHES[1]) and shown[2].endswith(SPEECHES[1])
+    assert shown[1].endswith("—")
+
+
+def test_a_reply_that_cuts_in_is_heard_out():
+    recorder = Recorder(play_seconds=0)
+    recorder.scripted = {1: SPEECHES[1], 2: SPEECHES[2], 3: SPEECHES[1]}
+    eagerness = {name: 4 for name, _, _ in TRIO}
+    _run(recorder, 4, speaker=False, personas=TRIO, rng=Interrupting(), eagerness=eagerness)
+    # Mira cuts Sol off, so Mira's own reply stands whole and Sol picks its point back up after it.
+    assert [name for name, _, _ in _turns(recorder)] == ["Mira", "Sol", "Mira", "Sol"]
+    assert _relayed(recorder)[2].endswith(SPEECHES[1])
+
+
+def test_nothing_is_interrupted_without_eagerness_ratings():
+    recorder = Recorder(play_seconds=0)
+    recorder.scripted = dict(SPEECHES)
+    _run(recorder, 4, speaker=False, personas=TRIO, rng=Interrupting())
+    assert "—" not in " ".join(_relayed(recorder))
+
+
+def test_system_prompt_marks_cutting_in_and_being_cut_off():
+    others = [("Sol", "skeptical")]
+    assert "cutting Sol off" in _system_prompt("Mira", "curious", others, "cars", interrupting="Sol")
+    assert "Sol just talked over you" in _system_prompt("Mira", "curious", others, "cars", cut_off_by="Sol")
+    plain = _system_prompt("Mira", "curious", others, "cars")
+    assert "cutting" not in plain and "talked over" not in plain
+
+
 def _conversation_args(turns):
     return argparse.Namespace(api_token="secret", agent_specs=["Mira|curious", "Sol|skeptical", "Dave|quiet"],
-                              turns=turns, read_aloud=False)
+                              turns=turns, read_aloud=False, interruptions=False)
 
 
 def test_at_least_two_turns_are_required():
