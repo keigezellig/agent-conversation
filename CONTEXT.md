@@ -56,6 +56,10 @@ _Avoid_: Speaker, TTS voice
 The runner speaking each reply out loud, live, as the conversation happens; off unless asked for on a given run.
 _Avoid_: Narration, TTS (as a domain term), recording
 
+**Window**:
+A view of a running **Conversation** on screen: the cast down one side and each **Reply** as it arrives, in place of the terminal. It shows the **Conversation**, it does not change it.
+_Avoid_: GUI, dashboard, viewer
+
 ## Relationships
 
 - A **Conversation** has two or more **Participants**
@@ -89,6 +93,10 @@ _Avoid_: Narration, TTS (as a domain term), recording
 - A **Reply** that could not be spoken is still shown, marked as not spoken; it never ends the **Conversation**
 - Each **Persona** has exactly one **Voice**; personas get distinct voices unless there are more personas than available voices
 - **Read-aloud** belongs to the **Runner**, not the bridge; the bridge has no notion of listeners or audio
+- The **Runner** hands every line it produces to one presenter, the terminal or a **Window**; which one is listening changes nothing about the **Conversation**
+- A **Window** shows one **Conversation** per tab, and starts another only once the current one has closed, so two runs never speak over each other
+- A **Window** reads a **Reply**'s **Persona** from the label the **Runner** shows it under, so what it attributes is exactly what was shown
+- With **Read-aloud**, the **Persona** lit in a **Window** is the one being heard, since a **Reply** is shown at the moment it starts being spoken
 
 ## Example dialogue
 
@@ -113,4 +121,6 @@ _Avoid_: Narration, TTS (as a domain term), recording
 - Taking a **Persona**'s **Language** from its **Voice** (`piper-sr_RS-…` meaning Serbian) was considered — rejected: **Read-aloud** is off on most runs, so the written language would depend on whether anyone is listening.
 - A **Persona** whose **Language** uses another script writes **Personas**' names in that script ("Хрвоје"), and an **Addressee** is found by matching the names as given, so such a **Reply** hands over the floor to nobody and the **Runner** picks at random — known, not yet resolved.
 - Letting the cut-off **Persona** carry on from the exact word it was cut off at was considered — rejected: it composes a fresh **Reply** knowing it was talked over, which is what someone picking a point back up actually does.
+- Showing several **Conversations** at once in a **Window** was considered — rejected: **Read-aloud** has one pair of speakers, so two live runs would talk over each other. The next **Conversation** opens only after the current one closes.
+- Letting a **Window** start, stop, or steer a **Conversation** was considered — rejected: it presents what the **Runner** does, like the terminal before it, so the cast and the subject stay command-line arguments.
 - "Turns" could mean rounds where everyone speaks once — resolved: a **Turn** is one **Reply**, and `--turns` counts **Replies**, not rounds.

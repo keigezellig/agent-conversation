@@ -36,6 +36,29 @@ services:
       - agent-bridge
     entrypoint: ["python", "-m", "app.agents", "--read-aloud"]
 
+  # The same runner in a window instead of the terminal. Runs as the host user, because the X socket
+  # is only writable by its owner (Xwayland), and with the host's X cookie, so no `xhost` is needed.
+  agent-chat-ui:
+    build:
+      context: .
+      target: runner-ui
+    profiles: [agents]
+    user: "${UID:-1000}:${GID:-1000}"
+    env_file: .env
+    environment:
+      AGENT_BRIDGE_URL: http://agent-bridge:8080
+      DISPLAY: ${DISPLAY:-:0}
+      XAUTHORITY: /tmp/.Xauthority
+      PULSE_SERVER: unix:/run/pulse/native
+      HOME: /tmp
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - ${XAUTHORITY:-${HOME}/.Xauthority}:/tmp/.Xauthority:ro
+      - ${XDG_RUNTIME_DIR:-/run/user/1000}/pulse/native:/run/pulse/native
+    depends_on:
+      - agent-bridge
+    entrypoint: ["python", "-m", "app.ui"]
+
   ollama:
     image: ollama/ollama
     profiles: [local-model]

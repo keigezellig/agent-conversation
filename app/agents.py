@@ -275,6 +275,27 @@ def _personas(args: argparse.Namespace) -> list[tuple[str, str, str | None]]:
 
 BRIEF_SHARE = 1 / 3
 
+# How a reply is shown, and how to read one back. A presenter other than the terminal has only these
+# lines to go on, so the format is written and parsed in one place rather than guessed at.
+NOT_SPOKEN = "[not spoken: {}]"
+
+
+def labelled(name: str, mood: str, text: str) -> str:
+    return f"{name} ({mood}): {text}"
+
+
+def attribute(line: str, personas) -> tuple[str | None, str]:
+    """Split a shown line into (persona, reply), or (None, line) for a note the runner made.
+
+    The labels are built from the same personas, so they are matched in full: a mood that happens to
+    read like a label, or a persona named in the reply itself, cannot be mistaken for the speaker.
+    """
+    for name, mood, _ in personas:
+        label = labelled(name, mood, "")
+        if line.startswith(label):
+            return name, line[len(label):]
+    return None, line
+
 
 async def _take_turns(personas, turns: int, compose, relay, speaker=None, show=print, rng=None,
                       eagerness: dict[str, int] | None = None) -> None:
@@ -352,7 +373,7 @@ async def _take_turns(personas, turns: int, compose, relay, speaker=None, show=p
     async def present() -> None:
         while (reply := await ready.get()) is not None:
             name, mood, text, clip, problem = reply
-            show(f"{name} ({mood}): {text}")
+            show(labelled(name, mood, text))
             lookahead.release()
             if clip is not None:
                 try:
@@ -360,7 +381,7 @@ async def _take_turns(personas, turns: int, compose, relay, speaker=None, show=p
                 except (OSError, RuntimeError) as error:
                     problem = str(error) or type(error).__name__
             if problem:
-                show(f"[not spoken: {problem}]")
+                show(NOT_SPOKEN.format(problem))
 
     try:
         async with asyncio.TaskGroup() as group:
@@ -384,7 +405,14 @@ def _speaker(args: argparse.Namespace, personas: list[tuple[str, str, str | None
     )
 
 
-async def run_conversation(args: argparse.Namespace) -> str:
+async def run_conversation(args: argparse.Namespace, show=None, on_start=None) -> str:
+    """Hold one conversation, handing every line it produces to `show`.
+
+    `show` defaults to the terminal, and `on_start` is handed the cast and the settings the run
+    settled on once the conversation exists, for a presenter that wants them as values rather than
+    as the lines that announce them.
+    """
+    show = show or (lambda line: print(line, flush=True))
     token = args.api_token
     if not token:
         raise RuntimeError("set API_TOKEN or pass --api-token")
@@ -410,8 +438,7 @@ async def run_conversation(args: argparse.Namespace) -> str:
         args.llm_max_tokens,
     )
     if spoken := {name: language for name, language in languages.items() if language}:
-        print("Languages: " + ", ".join(f"{name} {language}" for name, language in spoken.items()),
-              flush=True)
+        show("Languages: " + ", ".join(f"{name} {language}" for name, language in spoken.items()))
 
     eagerness = None
     if args.interruptions:
@@ -419,9 +446,8 @@ async def run_conversation(args: argparse.Namespace) -> str:
             _rate_eagerness, args.llm_api, args.llm_base_url, args.model, args.llm_api_key, personas,
             args.llm_max_tokens,
         )
-        print("Eagerness to interrupt: "
-              + ", ".join(f"{name} {rating}/{EAGERNESS_SCALE}" for name, rating in eagerness.items()),
-              flush=True)
+        show("Eagerness to interrupt: "
+             + ", ".join(f"{name} {rating}/{EAGERNESS_SCALE}" for name, rating in eagerness.items()))
 
     room = await asyncio.to_thread(
         _create_conversation,
@@ -434,7 +460,18 @@ async def run_conversation(args: argparse.Namespace) -> str:
     headers = {"Authorization": f"Bearer {token}"}
     histories = {name: [] for name in names}
 
-    print(f"Conversation {room['id']} | Subject: {args.subject}", flush=True)
+    if on_start:
+        on_start({
+            "id": room["id"],
+            "subject": args.subject,
+            "model": args.model,
+            "personas": personas,
+            "languages": languages,
+            "eagerness": eagerness,
+            "turns": args.turns,
+            "read_aloud": speaker is not None,
+        })
+    show(f"Conversation {room['id']} | Subject: {args.subject}")
     async with AsyncExitStack() as stack:
         sockets = {}
         for name in names:
@@ -480,7 +517,7 @@ async def run_conversation(args: argparse.Namespace) -> str:
                 _append_history(histories[peer], "user", f"{name}: {delivered['payload']['text']}")
 
         await _take_turns(personas, args.turns, compose, relay, speaker,
-                          show=lambda line: print(line, flush=True), rng=random.Random(args.seed),
+                          show=show, rng=random.Random(args.seed),
                           eagerness=eagerness)
 
     return room["id"]

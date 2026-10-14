@@ -22,6 +22,20 @@ RUN pip install --no-cache-dir -r requirements-dev.txt
 COPY tests ./tests
 CMD ["python", "-m", "pytest", "-q"]
 
+# Runner with a window: the full Python image, because the slim one is built without tkinter. Needs
+# the host's X socket, X cookie and DISPLAY at run time, and paplay for read-aloud.
+FROM python:3.12 AS runner-ui
+WORKDIR /srv
+ENV PYTHONUNBUFFERED=1
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends pulseaudio-utils \
+    && rm -rf /var/lib/apt/lists/*
+COPY app ./app
+RUN useradd -r -u 10001 agent
+USER agent
+
 # The bridge is the last stage so a plain build produces it.
 FROM base AS bridge
 EXPOSE 8080

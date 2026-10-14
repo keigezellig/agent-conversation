@@ -350,6 +350,48 @@ The runner sends only the standard fields (`model`, `input`, `voice`, `response_
 
 Before the conversation starts, the runner synthesizes a word in every voice and checks it can reach the audio server, and exits with an error naming the voice if either fails. After that, a reply whose speech fails — all four tries refused, a voice withdrawn, the engine restarted — is printed followed by `[not spoken: REASON]`, and the conversation carries on.
 
+## Watch the conversation in a window
+
+The same run, in a window instead of the terminal. `agent-chat-ui` takes exactly the flags
+`agent-chat` takes, read-aloud included, and shows the cast beside the replies as they arrive:
+
+```bash
+docker compose --profile agents run --build --rm agent-chat-ui \
+  --subject "Whether cities should ban private cars" \
+  --agent "Santa|a talk show host keeping order|af_heart" \
+  --agent "Richard|arrogant and takes no criticism|am_michael" \
+  --agent "Dan|aggressive and childish|am_fenrir" \
+  --agent "Joyce|annoyingly happy and off-topic|af_bella" \
+  --interruptions \
+  --read-aloud \
+  --turns 20
+```
+
+Down the left is the cast: each agent's mood, the eagerness rating it was given, the language its
+mood asks for, and the voice it speaks in. The agent speaking is lit and marked, and the count beside
+each name is how many replies it has got in — an agent nobody calls on stays dark all run.
+
+The replies themselves read as a transcript. An interrupted one breaks off on an orange dash and is
+marked `cut off`; the reply that took the floor from it is marked `cuts in`. A reply that could not be
+spoken keeps its `[not spoken: …]` line. The bar underneath says which turn the conversation is on and
+who is speaking.
+
+With `--read-aloud` the lit agent is the one you are hearing, because a reply is shown at the moment
+it starts being spoken. Without it the window is the same, minus the audio.
+
+When a conversation closes, **Hold another conversation** runs the same cast and subject again in a new
+tab. It stays disabled while one is running, so two conversations never speak over each other.
+
+The window needs your display, and the service is set up for it: it passes `DISPLAY` through,
+mounts your X cookie (`$XAUTHORITY`, or `~/.Xauthority` when that is unset), and runs as your user,
+because under Wayland the Xwayland socket only lets its owner connect. If your user id isn't 1000,
+run it with `UID=$(id -u) GID=$(id -g) docker compose ...`. To run it on the host instead of in Docker, it needs
+nothing but the dependencies in `requirements.txt` and a Python with tkinter:
+
+```bash
+python3 -m app.ui --subject "..." --agent "..." --agent "..." --turns 12
+```
+
 ## Develop
 
 Run the tests in Docker:
