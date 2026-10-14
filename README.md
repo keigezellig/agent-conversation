@@ -350,22 +350,34 @@ The runner sends only the standard fields (`model`, `input`, `voice`, `response_
 
 Before the conversation starts, the runner synthesizes a word in every voice and checks it can reach the audio server, and exits with an error naming the voice if either fails. After that, a reply whose speech fails — all four tries refused, a voice withdrawn, the engine restarted — is printed followed by `[not spoken: REASON]`, and the conversation carries on.
 
-## Watch the conversation in a window
+## Hold the conversation in a window
 
-The same run, in a window instead of the terminal. `agent-chat-ui` takes exactly the flags
-`agent-chat` takes, read-aloud included, and shows the cast beside the replies as they arrive:
+The same runner, in a window instead of the terminal. Each conversation is set up in a form there:
+the subject, the cast (name, mood and, optionally, voice per agent), the number of turns, the seed,
+and whether the agents may interrupt each other. The model and the voices are not in the form: they
+stay as `.env` and the command line set them, and the form says which model it will use and whether
+read-aloud is on.
+
+```bash
+docker compose --profile agents run --build --rm agent-chat-ui --read-aloud
+```
+
+Anything else `agent-chat` takes can be given here too, and fills in the first form, so a cast kept
+in a script still works — it now opens the form with everything filled in, ready to start:
 
 ```bash
 docker compose --profile agents run --build --rm agent-chat-ui \
   --subject "Whether cities should ban private cars" \
   --agent "Santa|a talk show host keeping order|af_heart" \
   --agent "Richard|arrogant and takes no criticism|am_michael" \
-  --agent "Dan|aggressive and childish|am_fenrir" \
-  --agent "Joyce|annoyingly happy and off-topic|af_bella" \
   --interruptions \
   --read-aloud \
   --turns 20
 ```
+
+The form checks what it is given before anything starts — a subject, at least two agents with a name
+and a mood each, no two with the same name, a whole number of turns — and says what to fix. A row
+left wholly empty is skipped, and an agent left without a voice gets one from the pool.
 
 Down the left is the cast: each agent's mood, the eagerness rating it was given, the language its
 mood asks for, and the voice it speaks in. The agent speaking is lit and marked, and the count beside
@@ -379,8 +391,14 @@ who is speaking.
 With `--read-aloud` the lit agent is the one you are hearing, because a reply is shown at the moment
 it starts being spoken. Without it the window is the same, minus the audio.
 
-When a conversation closes, **Hold another conversation** runs the same cast and subject again in a new
-tab. It stays disabled while one is running, so two conversations never speak over each other.
+**New conversation** (ctrl+n) opens a form filled in with the conversation held last, to change as
+little or as much as you like; **Start conversation** (ctrl+enter) holds it in a new tab. The next one
+can be set up while one is running, but it starts only once that one has closed, so two
+conversations never speak over each other.
+
+**Stop** (esc), at the top of a running conversation, ends it where it is. The reply being read aloud
+breaks off at once rather than playing out, and the next conversation can start straight away. The
+transcript so far stays in its tab, marked with how many turns it got to.
 
 The window needs your display, and the service is set up for it: it passes `DISPLAY` through,
 mounts your X cookie (`$XAUTHORITY`, or `~/.Xauthority` when that is unset), and runs as your user,
@@ -389,7 +407,7 @@ run it with `UID=$(id -u) GID=$(id -g) docker compose ...`. To run it on the hos
 nothing but the dependencies in `requirements.txt` and a Python with tkinter:
 
 ```bash
-python3 -m app.ui --subject "..." --agent "..." --agent "..." --turns 12
+python3 -m app.ui
 ```
 
 ## Develop

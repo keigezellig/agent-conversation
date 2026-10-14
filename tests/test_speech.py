@@ -389,3 +389,27 @@ def test_a_failing_later_piece_is_reported_after_what_was_ready_is_spoken():
 def test_speaking_refuses_replies_with_nothing_to_speak():
     with pytest.raises(RuntimeError, match="nothing to speak"):
         Speaker(FakeEngine(), FakePlayer(), {"Mira": "af_heart"}).open("Mira", "🚗 🚲")
+
+
+def test_hushing_the_player_cuts_off_what_it_is_playing_and_plays_nothing_more(monkeypatch):
+    import subprocess
+
+    player = speech.PulsePlayer(1000)
+    opened = []
+
+    def open_paplay():
+        opened.append(subprocess.Popen(["sh", "-c", "cat > /dev/null"],
+                                       stdin=subprocess.PIPE, stderr=subprocess.PIPE))
+        return opened[-1]
+
+    monkeypatch.setattr(player, "open", open_paplay)
+
+    def audio():
+        yield b"\0" * 100
+        player.hush()
+        yield b"\0" * 100
+
+    player.play(audio())  # killed, but because it was hushed, so not a playback failure
+    assert opened[0].returncode != 0
+    player.play(iter([b"\0" * 100]))
+    assert len(opened) == 1

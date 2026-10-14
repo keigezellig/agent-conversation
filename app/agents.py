@@ -389,6 +389,12 @@ async def _take_turns(personas, turns: int, compose, relay, speaker=None, show=p
             group.create_task(present())
     except ExceptionGroup as error:
         raise error.exceptions[0] from None
+    except asyncio.CancelledError:
+        # Stopped: playback runs in a thread that cancelling does not reach, so the reply being
+        # spoken would otherwise play out to its end.
+        if speaker:
+            speaker.hush()
+        raise
 
 
 def _speaker(args: argparse.Namespace, personas: list[tuple[str, str, str | None]]) -> Speaker:
@@ -523,9 +529,11 @@ async def run_conversation(args: argparse.Namespace, show=None, on_start=None) -
     return room["id"]
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv=None, need_conversation: bool = True) -> argparse.Namespace:
+    """The run's settings. The window asks for the subject and the cast itself, so it passes
+    `need_conversation=False` and takes whatever the command line gives it as a starting point."""
     parser = argparse.ArgumentParser(description="Have configurable AI agents talk through agent-bridge.")
-    parser.add_argument("--subject", required=True, help="Any topic for the agents to discuss")
+    parser.add_argument("--subject", required=need_conversation, help="Any topic for the agents to discuss")
     parser.add_argument("--agent", dest="agent_specs", action="append", help="Agent persona as NAME|MOOD or NAME|MOOD|VOICE; repeat for each agent")
     parser.add_argument("--turns", type=int, default=8, help="Number of replies to generate (default: 8)")
     parser.add_argument("--seed", type=int, help="Seed for picking who speaks next when nobody is called on")
@@ -554,11 +562,52 @@ def parse_args() -> argparse.Namespace:
                         help="Sample rate in hertz of the speech endpoint's raw audio (default: 24000)")
     parser.add_argument("--tts-format", choices=("pcm", "wav"), default=os.getenv("TTS_FORMAT") or "pcm",
                         help="What to ask the speech endpoint for; wav is for engines that cannot do pcm")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     defaults = API_DEFAULTS[args.llm_api]
     args.llm_base_url = args.llm_base_url or defaults["base_url"]
     args.model = args.model or defaults["model"]
     return args
+
+
+def conversation_args(base: argparse.Namespace, subject: str, cast, turns: str, seed: str,
+                      interruptions: bool) -> argparse.Namespace:
+    """The settings for one conversation set up in the window, over the run's own in `base`.
+
+    `cast` is a (name, mood, voice) row per persona as typed, voice "" for one from the pool; a row
+    left wholly empty is skipped. The model and the voices are not asked for here: they stay as the
+    command line set them. Raises ValueError saying what to fix.
+    """
+    subject = subject.strip()
+    if not subject:
+        raise ValueError("give the conversation a subject")
+    specs, names = [], []
+    for row in cast:
+        name, mood, voice = (field.strip() for field in row)
+        if not (name or mood or voice):
+            continue
+        if not (name and mood):
+            raise ValueError("every agent needs a name and a mood")
+        if any("|" in field for field in (name, mood, voice)):
+            raise ValueError("a name, mood or voice cannot contain |")
+        if name in names:
+            raise ValueError(f"two agents are called {name}")
+        names.append(name)
+        specs.append(f"{name}|{mood}|{voice}")
+    if len(specs) < 2:
+        raise ValueError("a conversation needs at least two agents")
+    try:
+        turns = int(str(turns).strip())
+    except ValueError:
+        turns = 0
+    if turns < 1:
+        raise ValueError("turns must be a whole number of at least 1")
+    seed = str(seed or "").strip()
+    try:
+        seed = int(seed) if seed else None
+    except ValueError:
+        raise ValueError("the seed must be a whole number, or left empty") from None
+    return argparse.Namespace(**{**vars(base), "subject": subject, "agent_specs": specs,
+                                 "turns": turns, "seed": seed, "interruptions": interruptions})
 
 
 def main() -> None:

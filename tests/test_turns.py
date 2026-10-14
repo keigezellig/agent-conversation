@@ -137,6 +137,23 @@ def test_failed_playback_is_marked_and_the_conversation_continues():
     assert shown == ["Mira (curious): reply 1", "[not spoken: playback failed]", "Sol (skeptical): reply 2"]
 
 
+def test_stopping_a_conversation_hushes_the_reply_being_spoken():
+    recorder = Recorder(play_seconds=0.5)
+    recorder.hush = lambda: recorder.log("hush")
+
+    async def stop_mid_reply():
+        conversation = asyncio.create_task(_take_turns(
+            PERSONAS, 5, recorder.compose, recorder.relay, recorder, show=recorder.show))
+        await asyncio.sleep(0.1)
+        conversation.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await conversation
+
+    asyncio.run(stop_mid_reply())
+    assert ("hush",) in recorder.events
+    assert [event[1] for event in recorder.events if event[0] == "show"] == ["Mira (curious): reply 1"]
+
+
 def test_without_a_speaker_replies_are_only_shown():
     recorder = Recorder()
     _run(recorder, 3, speaker=False)

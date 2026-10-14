@@ -244,6 +244,9 @@ class PulsePlayer:
 
     def __init__(self, sample_rate: int = 24000):
         self.sample_rate = sample_rate
+        self.hushed = False
+        self.playing: subprocess.Popen | None = None
+        self.lock = threading.Lock()
 
     def check(self) -> None:
         try:
@@ -271,11 +274,24 @@ class PulsePlayer:
     def silence(self, milliseconds: int) -> bytes:
         return bytes(2 * (self.sample_rate * milliseconds // 1000))
 
+    def hush(self) -> None:
+        """Stop what is playing at once, rather than letting paplay play out what it has, and play
+        nothing more."""
+        with self.lock:
+            self.hushed = True
+            if self.playing is not None:
+                self.playing.kill()
+
     def play(self, audio) -> None:
         """Play everything the given iterable yields, writing each piece as soon as it is available."""
-        player = self.open()
+        with self.lock:
+            if self.hushed:
+                return
+            player = self.playing = self.open()
         try:
             for piece in audio:
+                if self.hushed:
+                    break
                 player.stdin.write(piece)
         except BrokenPipeError:
             pass
@@ -287,7 +303,9 @@ class PulsePlayer:
             stderr = player.stderr.read().decode(errors="replace")
             player.stderr.close()
             player.wait()
-        if player.returncode != 0:
+            with self.lock:
+                self.playing = None
+        if player.returncode != 0 and not self.hushed:
             raise RuntimeError(f"playback failed: {stderr.strip() or 'paplay exited with an error'}")
 
 
@@ -367,3 +385,7 @@ class Speaker:
 
     def speak(self, clip: Clip) -> None:
         self.player.play(clip.audio(self.player.silence(PAUSE_MS)))
+
+    def hush(self) -> None:
+        """Stop speaking mid-reply, for a conversation that is stopped."""
+        self.player.hush()
