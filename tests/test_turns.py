@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import random
 import threading
 import time
 
@@ -79,10 +80,10 @@ class Recorder:
         self.log("show", line)
 
 
-def _run(recorder, turns, speaker=True, personas=PERSONAS, rng=None, eagerness=None):
+def _run(recorder, turns, speaker=True, personas=PERSONAS, rng=None, eagerness=None, leader=None):
     asyncio.run(_take_turns(
         personas, turns, recorder.compose, recorder.relay,
-        recorder if speaker else None, show=recorder.show, rng=rng, eagerness=eagerness,
+        recorder if speaker else None, show=recorder.show, rng=rng, eagerness=eagerness, leader=leader,
     ))
 
 
@@ -374,7 +375,7 @@ def test_system_prompt_marks_cutting_in_and_being_cut_off():
 
 def _conversation_args(turns):
     return argparse.Namespace(api_token="secret", agent_specs=["Mira|curious", "Sol|skeptical", "Dave|quiet"],
-                              turns=turns, read_aloud=False, interruptions=False)
+                              turns=turns, read_aloud=False, interruptions=False, leader=None)
 
 
 def test_at_least_two_turns_are_required():
@@ -396,3 +397,69 @@ def test_system_prompt_asks_for_the_chosen_length():
     assert "very short" in _system_prompt("Mira", "curious", others, "cars", brief=True)
     normal = _system_prompt("Mira", "curious", others, "cars")
     assert "two or three sentences" in normal and "very short" not in normal
+
+
+TRIO = [("Mira", "curious", None), ("Sol", "skeptical", None), ("Dave", "quiet", None)]
+
+
+def test_a_leader_opens_and_closes_whoever_the_last_reply_called_on():
+    recorder = Recorder(play_seconds=0)
+    recorder.scripted = {5: "Mira, what do you say?"}
+    _run(recorder, 6, personas=TRIO, rng=random.Random(1), leader="Dave")
+    turns = _turns(recorder)
+    assert turns[0] == ("Dave", None, False)
+    assert turns[-1] == ("Dave", None, True)
+
+
+def test_a_leader_called_on_just_before_the_close_answers_in_the_closing_reply():
+    recorder = Recorder(play_seconds=0)
+    recorder.scripted = {5: "Dave, wrap it up?"}
+    _run(recorder, 6, personas=TRIO, rng=random.Random(1), leader="Dave")
+    assert _turns(recorder)[-1] == ("Dave", "Sol" if _turns(recorder)[4][0] == "Sol" else "Mira", True)
+
+
+def test_a_leader_does_not_take_the_turn_before_it_closes():
+    for seed in range(20):
+        recorder = Recorder(play_seconds=0)
+        recorder.scripted = {4: "Dave, what do you think?"}
+        _run(recorder, 6, personas=TRIO, rng=random.Random(seed), leader="Dave")
+        names = [name for name, _, _ in _turns(recorder)]
+        assert names[4] != "Dave", names
+
+
+def test_nobody_cuts_in_on_the_floor_the_leader_closes_on():
+    cut_ins = 0
+    long = "Well, I have been thinking about this for a while now, and I really do believe it matters a lot."
+    for seed in range(30):
+        recorder = Recorder(play_seconds=0)
+        recorder.scripted = {turn: long for turn in range(1, 7)}
+        _run(recorder, 6, personas=TRIO, rng=random.Random(seed), leader="Dave",
+             eagerness={"Mira": 4, "Sol": 4, "Dave": 4})
+        turns = [name for name, _, _ in _turns(recorder)]
+        cutting = [event[1:] for event in recorder.events if event[0] == "cutting"]
+        assert turns[0] == turns[-1] == "Dave"
+        assert turns[4] != "Dave"
+        assert cutting[-1][0] is None, "the leader's closing reply was a cut-in"
+        cut_ins += sum(1 for interrupting, _ in cutting if interrupting)
+    assert cut_ins, "nobody ever cut in, so this proved nothing"
+
+
+def test_without_a_leader_the_first_listed_persona_opens():
+    recorder = Recorder(play_seconds=0)
+    _run(recorder, 3, personas=TRIO, rng=random.Random(1))
+    assert _turns(recorder)[0][0] == "Mira"
+
+
+def test_the_leader_is_told_it_hosts_and_the_others_who_does():
+    others = [("Sol", "skeptical")]
+    assert "You are a talk show host" in _system_prompt("Mira", "curious", others, "cars", leader="Mira")
+    told = _system_prompt("Sol", "skeptical", [("Mira", "curious")], "cars", leader="Mira")
+    assert "Mira is the talk show host" in told and "You are a talk show host" not in told
+    assert "talk show host" not in _system_prompt("Mira", "curious", others, "cars")
+
+
+def test_a_leader_who_is_not_in_the_cast_is_refused():
+    args = _conversation_args(4)
+    args.leader = "Zed"
+    with pytest.raises(RuntimeError, match="--leader Zed is not one of the agents"):
+        asyncio.run(run_conversation(args))

@@ -87,6 +87,19 @@ Repeat `--agent "NAME|MOOD"` for every participant (a mood cannot contain `|`); 
 
 The first agent listed opens. Each agent knows the others' names and moods. When a reply calls on someone by name ("Sol, …" or "…, what do you think, Dave?"), that agent answers next; a name merely mentioned ("what Mira said") or used to acknowledge someone before moving on ("Great point, Mira. Anyway, …") does not count. Otherwise the next speaker is picked at random, never the one who just spoke, with better odds for whoever has been silent longest, so an agent nobody calls on may stay quiet. Pass `--seed N` to make those picks repeatable. The agent taking the last turn is asked to bring the conversation to a close.
 
+### A talk show host to lead it
+
+Pass `--leader NAME` to make one of the agents the talk show host. Its instructions tell it so — it
+opens the discussion, keeps it moving by bringing the others in, and closes it — and the others are
+told who is hosting. The host always opens and always closes, whoever the reply before it called on,
+and does not take the turn just before its closing one, so it never closes straight after itself
+(unless a cast of two leaves no one else). Nobody cuts in on that turn either, because cutting in
+would take the floor the host closes on. In between, the host speaks when called on or picked like
+anyone else.
+
+Without `--leader` nothing changes: the first agent listed opens, and whoever's turn comes up last
+closes.
+
 ### Agents that write in their own language
 
 Say it in the mood and the agent writes in that language:
@@ -353,7 +366,8 @@ Before the conversation starts, the runner synthesizes a word in every voice and
 ## Hold the conversation in a window
 
 The same runner, in a window instead of the terminal. Each conversation is set up in a form there:
-the subject, the cast (name, mood and, optionally, voice per agent), the number of turns, the seed,
+the subject, the cast (name, mood and, optionally, voice per agent, with a tick for the agent who
+hosts, if any), the number of turns, the seed,
 and whether the agents may interrupt each other. The model and the voices are not in the form: they
 stay as `.env` and the command line set them, and the form says which model it will use and whether
 read-aloud is on.

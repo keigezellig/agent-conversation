@@ -57,6 +57,11 @@ def test_the_form_sets_the_conversation_and_keeps_the_model_and_the_voices():
     assert BASE.subject is None
 
 
+def test_the_form_may_appoint_a_leader_or_none():
+    assert set_up(leader="Sol").leader == "Sol"
+    assert set_up().leader is None
+
+
 def test_an_empty_row_in_the_cast_is_skipped_and_the_fields_are_trimmed():
     args = set_up(subject="  Cars \n", cast=[(" Mira ", "curious ", " "), ("", "", ""), *TWO[1:]], seed=" 7 ")
     assert args.subject == "Cars"
@@ -70,7 +75,8 @@ def test_an_empty_row_in_the_cast_is_skipped_and_the_fields_are_trimmed():
     ({"cast": [("Mira", "", ""), *TWO[1:]]}, "a name and a mood"),
     ({"cast": [*TWO, ("Mira", "loud", "")]}, "two agents are called Mira"),
     ({"cast": [("Mira", "a|b", ""), *TWO[1:]]}, "cannot contain |"),
-    ({"turns": "0"}, "turns"),
+    ({"turns": "1"}, "turns"),
+    ({"leader": "Zed"}, "the leader Zed is not one of the agents"),
     ({"turns": "many"}, "turns"),
     ({"seed": "abc"}, "seed"),
 ])

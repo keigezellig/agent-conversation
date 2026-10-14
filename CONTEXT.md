@@ -32,6 +32,10 @@ _Avoid_: Response, utterance
 One step of a runner conversation in which exactly one **Persona** gives a **Reply**. Who takes the next turn follows from the conversation so far, not from a fixed rotation.
 _Avoid_: Round, slot
 
+**Leader**:
+The **Persona** appointed talk show host for a **Conversation**: told it hosts, it opens the **Conversation** and closes it. At most one per **Conversation**, and none unless asked for on a given run.
+_Avoid_: Moderator, chair, host (as a domain term)
+
 **Addressee**:
 The **Persona** a **Reply** hands the floor to by calling on them by name ("Sol, …" or "…, Dave?"), as opposed to merely mentioning them ("what Mira said") or acknowledging them before moving on ("Great point, Mira. Anyway, …"). A call hands over the floor when it is a question or only questions follow it. When a **Reply** calls on several, the last one called on is the addressee. The addressee takes the next **Turn**.
 _Avoid_: Target, recipient (the bridge's per-delivery `to` is a different thing)
@@ -66,7 +70,8 @@ _Avoid_: GUI, dashboard, viewer
 - In a runner conversation, each **Persona** is exactly one **Participant**
 - The **Runner** produces one **Reply** per **Turn**, and **Read-aloud** speaks each **Reply**
 - With **Read-aloud**, each **Reply** is shown at the moment it starts being spoken, and **Replies** are never spoken over each other; the next **Persona** may already be composing its **Reply** while the current one is spoken, but at most one **Reply** ahead
-- The first **Persona** listed for a run opens the **Conversation**
+- The first **Persona** listed for a run opens the **Conversation**, unless there is a **Leader**
+- A **Leader** takes the first and the last **Turn**, overruling any **Addressee** for the last one; the **Turn** before the last is neither the **Leader**'s, where another **Persona** can take it, nor interrupted, so the **Leader** never closes straight after itself and nobody cuts in on the floor it closes on
 - A **Reply** with an **Addressee** hands them the next **Turn**; otherwise the **Runner** picks the next **Persona** at random, never the one who just spoke, with the odds favouring whoever has been silent longest, so no fixed order emerges
 - An **Interruption** overrules both: the **Persona** who cut in takes the next **Turn**, and nobody the cut-off **Reply** called on gets it, not even an **Addressee** named in the part that was still heard
 - Each **Persona** knows the other **Personas**' names and moods, and may call on one of them, but usually speaks to the group

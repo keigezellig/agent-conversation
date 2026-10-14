@@ -90,12 +90,12 @@ class Setup(tk.Frame):
         self.table = tk.Frame(self, bg=BG)
         self.table.pack(fill="x")
         self.table.columnconfigure(1, weight=1)
-        for column, heading in enumerate(("name", "mood", "voice  (empty: one from the pool)")):
+        for column, heading in enumerate(("name", "mood", "voice  (empty: one from the pool)", "host")):
             tk.Label(self.table, text=heading, bg=BG, fg=INK_3, font=self.f_small,
                      anchor="w").grid(row=0, column=column, sticky="w", padx=(0, 8))
         rows = self._rows(args.agent_specs)
         for name, mood, voice in rows + [("", "", "")] * (2 - len(rows)):
-            self.add(name, mood, voice)
+            self.add(name, mood, voice, leads=bool(name) and name == args.leader)
         tk.Button(self, text="+ add agent", command=lambda: self.add(focus=True), fg=INK_2,
                   activeforeground=INK, font=self.f_small, **FLAT).pack(anchor="w", pady=(4, 0))
 
@@ -135,11 +135,17 @@ class Setup(tk.Frame):
         """The command line's NAME|MOOD|VOICE specs as rows, taken as they are: the form checks them."""
         return [tuple((*(part.strip() for part in spec.split("|", 2)), "", "")[:3]) for spec in specs or []]
 
-    def add(self, name: str = "", mood: str = "", voice: str = "", focus: bool = False) -> None:
+    def add(self, name: str = "", mood: str = "", voice: str = "", leads: bool = False,
+            focus: bool = False) -> None:
         row = {}
         for key, value, width in (("name", name, 14), ("mood", mood, 40), ("voice", voice, 26)):
             row[key] = tk.Entry(self.table, width=width, font=self.f_field, **FIELD)
             row[key].insert(0, value)
+        # At most one host: ticking one unticks the others, and unticking leaves the cast without one.
+        row["leads"] = tk.BooleanVar(value=leads)
+        row["host"] = tk.Checkbutton(self.table, variable=row["leads"], bg=BG, fg=INK, selectcolor=PANEL,
+                                     activebackground=BG, highlightthickness=0, bd=0,
+                                     command=lambda: self._lead(row))
         row["remove"] = tk.Button(self.table, text="✕", fg=INK_3, activeforeground=CUT,
                                   font=self.f_small, command=lambda: self._remove(row), **FLAT)
         self.cast.append(row)
@@ -147,15 +153,21 @@ class Setup(tk.Frame):
         if focus:
             row["name"].focus_set()
 
+    def _lead(self, row: dict) -> None:
+        if row["leads"].get():
+            for other in self.cast:
+                if other is not row:
+                    other["leads"].set(False)
+
     def _remove(self, row: dict) -> None:
         self.cast.remove(row)
-        for widget in row.values():
-            widget.destroy()
+        for key in ("name", "mood", "voice", "host", "remove"):
+            row[key].destroy()
         self._regrid()
 
     def _regrid(self) -> None:
         for line, row in enumerate(self.cast, start=1):
-            for column, key in enumerate(("name", "mood", "voice", "remove")):
+            for column, key in enumerate(("name", "mood", "voice", "host", "remove")):
                 row[key].grid(row=line, column=column, sticky="ew", padx=(0, 8), pady=2, ipady=3)
 
     def refresh(self) -> None:
@@ -171,7 +183,8 @@ class Setup(tk.Frame):
             args = conversation_args(
                 self.base, self.subject.get("1.0", "end"),
                 [(row["name"].get(), row["mood"].get(), row["voice"].get()) for row in self.cast],
-                self.turns.get(), self.seed.get(), self.interruptions.get())
+                self.turns.get(), self.seed.get(), self.interruptions.get(),
+                next((row["name"].get() for row in self.cast if row["leads"].get()), ""))
         except ValueError as error:
             self.problem.configure(text=str(error), fg=CUT)
             return
@@ -324,7 +337,7 @@ class Conversation(ttk.Frame):
                                  + ("  ·  read-aloud" if info["read_aloud"] else "")
                                  + ("  ·  interruptions" if info["eagerness"] else ""))
         for name, _, _ in self.personas:
-            bits = []
+            bits = ["talk show host"] if name == self.args.leader else []
             if rating := (info["eagerness"] or {}).get(name):
                 bits.append("●" * rating + "○" * (EAGERNESS_SCALE - rating) + f"  eager {rating}/{EAGERNESS_SCALE}")
             if language := (info["languages"] or {}).get(name):

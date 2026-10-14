@@ -206,7 +206,7 @@ async def _send_text(socket, text: str, turn: int) -> None:
 def _system_prompt(name: str, mood: str, others: list[tuple[str, str]], subject: str, read_aloud: bool = False,
                    addressed_by: str | None = None, closing: bool = False, brief: bool = False,
                    interrupting: str | None = None, cut_off_by: str | None = None,
-                   language: str | None = None) -> str:
+                   language: str | None = None, leader: str | None = None) -> str:
     people = ", ".join(f"{other} ({other_mood})" for other, other_mood in others)
     prompt = (
         f"You are {name}, one of several AI agents having a natural group conversation. "
@@ -217,6 +217,11 @@ def _system_prompt(name: str, mood: str, others: list[tuple[str, str]], subject:
         "Write only what you say, without a name label in front. "
         "Do not repeat points just to fill space. Keep your wording informal and very simple."
     )
+    if leader == name:
+        prompt += (" You are a talk show host leading this discussion: you open it, keep it moving by "
+                   "bringing the others in, and close it.")
+    elif leader:
+        prompt += f" {leader} is the talk show host leading this discussion."
     if brief:
         prompt += " Keep this reply very short: a few words or one sentence, like a quick reaction."
     else:
@@ -298,7 +303,7 @@ def attribute(line: str, personas) -> tuple[str | None, str]:
 
 
 async def _take_turns(personas, turns: int, compose, relay, speaker=None, show=print, rng=None,
-                      eagerness: dict[str, int] | None = None) -> None:
+                      eagerness: dict[str, int] | None = None, leader: str | None = None) -> None:
     """Have personas take turns, showing each reply and reading it aloud when a speaker is given.
 
     The first persona opens. Whoever a reply calls on by name speaks next; otherwise the next persona
@@ -311,6 +316,9 @@ async def _take_turns(personas, turns: int, compose, relay, speaker=None, show=p
     A reply is shown when it starts being spoken. The next reply may be composed while the current
     one is spoken, but composing never runs more than one reply ahead of what has been heard.
     A reply starts being spoken as soon as its opening piece is synthesized, not when all of it is.
+    With a leader, the leader opens and closes whoever was called on, and the turn before the closing
+    one is neither interrupted nor, where the cast allows it, the leader's, so it does not close
+    straight after itself.
     """
     rng = rng or random.Random()
     moods = {name: mood for name, mood, _ in personas}
@@ -319,7 +327,9 @@ async def _take_turns(personas, turns: int, compose, relay, speaker=None, show=p
     lookahead = asyncio.Semaphore(1)
 
     async def produce() -> None:
-        name, addressed_by, interrupting, cut_off_by, last_turns = names[0], None, None, None, {}
+        name, addressed_by, interrupting, cut_off_by, last_turns = leader or names[0], None, None, None, {}
+        # Who may take the turn before the leader closes: anyone but the leader.
+        led = [other for other in names if other != leader]
         for turn in range(turns):
             mood = moods[name]
             closing = turn == turns - 1
@@ -333,11 +343,14 @@ async def _take_turns(personas, turns: int, compose, relay, speaker=None, show=p
                 await compose(turn, name, mood, addressed_by, closing, brief, interrupting, cut_off_by),
                 names,
             )
-            interrupter, heard = None, None
+            interrupter, heard, upcoming = None, None, turn + 1
             # A reply that is itself a cut-in is heard out: otherwise two pushy personas cut each
             # other off turn after turn and the conversation never gets a finished sentence in.
-            if eagerness and turn > 0 and not closing and not interrupting:
-                interrupter = pick_interrupter(name, names, eagerness, rng)
+            if (eagerness and turn > 0 and not closing and not interrupting
+                    and not (leader and upcoming == turns - 1)):
+                # Cutting in takes the next turn, so the turn before the leader closes is not taken.
+                interrupter = pick_interrupter(name, led if leader and upcoming == turns - 2 else names,
+                                               eagerness, rng)
                 heard = cut_off(text, rng) if interrupter else None
                 # A reply too short to cut was over before anyone could get a word in.
                 interrupter = interrupter if heard else None
@@ -354,6 +367,14 @@ async def _take_turns(personas, turns: int, compose, relay, speaker=None, show=p
                 next_name = interrupting  # the persona cut off here usually gets the floor back
             else:
                 next_name = pick_next(name, names, last_turns, rng)
+            if leader and upcoming == turns - 1:
+                if called_on != leader:
+                    called_on = None  # the leader has the last word, whoever this reply called on
+                next_name = leader
+            elif (leader and upcoming == turns - 2 and next_name == leader
+                  and any(other != name for other in led)):
+                called_on = None
+                next_name = pick_next(name, led, last_turns, rng)
             clip, problem = None, None
             if speaker:
                 try:
@@ -425,6 +446,8 @@ async def run_conversation(args: argparse.Namespace, show=None, on_start=None) -
     personas = _personas(args)
     if args.turns < 2:
         raise RuntimeError("--turns must be at least 2")
+    if args.leader and args.leader not in (name for name, _, _ in personas):
+        raise RuntimeError(f"--leader {args.leader} is not one of the agents")
     if args.llm_api == "claude" and not args.llm_api_key:
         raise RuntimeError(NO_CLAUDE_KEY)
     if args.llm_max_tokens < 1:
@@ -505,7 +528,7 @@ async def run_conversation(args: argparse.Namespace, show=None, on_start=None) -
                 args.llm_api_key,
                 _system_prompt(
                     name, mood, others, args.subject, args.read_aloud, addressed_by, closing, brief,
-                    interrupting, cut_off_by, languages.get(name),
+                    interrupting, cut_off_by, languages.get(name), args.leader,
                 ),
                 list(history),
                 args.llm_max_tokens,
@@ -524,7 +547,7 @@ async def run_conversation(args: argparse.Namespace, show=None, on_start=None) -
 
         await _take_turns(personas, args.turns, compose, relay, speaker,
                           show=show, rng=random.Random(args.seed),
-                          eagerness=eagerness)
+                          eagerness=eagerness, leader=args.leader)
 
     return room["id"]
 
@@ -537,6 +560,8 @@ def parse_args(argv=None, need_conversation: bool = True) -> argparse.Namespace:
     parser.add_argument("--agent", dest="agent_specs", action="append", help="Agent persona as NAME|MOOD or NAME|MOOD|VOICE; repeat for each agent")
     parser.add_argument("--turns", type=int, default=8, help="Number of replies to generate (default: 8)")
     parser.add_argument("--seed", type=int, help="Seed for picking who speaks next when nobody is called on")
+    parser.add_argument("--leader", metavar="NAME",
+                        help="Make this agent the talk show host, who opens and closes the conversation")
     parser.add_argument("--interruptions", action="store_true",
                         help="Let the agents cut each other off mid-sentence, the pushier moods more often")
     parser.add_argument("--bridge-url", default=os.getenv("AGENT_BRIDGE_URL", "http://localhost:8080"))
@@ -570,11 +595,11 @@ def parse_args(argv=None, need_conversation: bool = True) -> argparse.Namespace:
 
 
 def conversation_args(base: argparse.Namespace, subject: str, cast, turns: str, seed: str,
-                      interruptions: bool) -> argparse.Namespace:
+                      interruptions: bool, leader: str = "") -> argparse.Namespace:
     """The settings for one conversation set up in the window, over the run's own in `base`.
 
     `cast` is a (name, mood, voice) row per persona as typed, voice "" for one from the pool; a row
-    left wholly empty is skipped. The model and the voices are not asked for here: they stay as the
+    left wholly empty is skipped, and `leader` is the name of the talk show host, "" for none. The model and the voices are not asked for here: they stay as the
     command line set them. Raises ValueError saying what to fix.
     """
     subject = subject.strip()
@@ -599,15 +624,19 @@ def conversation_args(base: argparse.Namespace, subject: str, cast, turns: str, 
         turns = int(str(turns).strip())
     except ValueError:
         turns = 0
-    if turns < 1:
-        raise ValueError("turns must be a whole number of at least 1")
+    if turns < 2:
+        raise ValueError("turns must be a whole number of at least 2")
+    leader = leader.strip() or None
+    if leader and leader not in names:
+        raise ValueError(f"the leader {leader} is not one of the agents")
     seed = str(seed or "").strip()
     try:
         seed = int(seed) if seed else None
     except ValueError:
         raise ValueError("the seed must be a whole number, or left empty") from None
     return argparse.Namespace(**{**vars(base), "subject": subject, "agent_specs": specs,
-                                 "turns": turns, "seed": seed, "interruptions": interruptions})
+                                 "turns": turns, "seed": seed, "interruptions": interruptions,
+                                 "leader": leader})
 
 
 def main() -> None:
