@@ -1,7 +1,7 @@
 """A desktop window to set up conversations in, and to watch them as they happen.
 
-Each conversation is set up in a form: its subject, its cast, how many turns, and whether the
-personas may interrupt. The model and the voices are not in it; they stay as the command line, or
+Each conversation is set up in a form: its subject, its tone, its cast, how many turns, and whether
+the personas may interrupt. The model and the voices are not in it; they stay as the command line, or
 .env, set them for the whole run, and whatever else the command line said fills the first form in.
 
 The runner hands every line it produces to a `show` callback, which is all this needs: the lines
@@ -85,6 +85,10 @@ class Setup(tk.Frame):
         self.subject.insert("1.0", args.subject or "")
         self.subject.bind("<Tab>", lambda _: (self.subject.tk_focusNext().focus(), "break")[1])
         self.subject.pack(fill="x")
+
+        self._caption("Tone  (empty: informal and very simple)")
+        self.tone = tk.StringVar(value=args.tone or "")
+        tk.Entry(self, textvariable=self.tone, font=self.f_field, **FIELD).pack(fill="x", ipady=3)
 
         self._caption("Cast")
         self.table = tk.Frame(self, bg=BG)
@@ -184,7 +188,8 @@ class Setup(tk.Frame):
                 self.base, self.subject.get("1.0", "end"),
                 [(row["name"].get(), row["mood"].get(), row["voice"].get()) for row in self.cast],
                 self.turns.get(), self.seed.get(), self.interruptions.get(),
-                next((row["name"].get() for row in self.cast if row["leads"].get()), ""))
+                next((row["name"].get() for row in self.cast if row["leads"].get()), ""),
+                self.tone.get())
         except ValueError as error:
             self.problem.configure(text=str(error), fg=CUT)
             return
@@ -334,6 +339,7 @@ class Conversation(ttk.Frame):
 
     def _on_start(self, info: dict) -> None:
         self.meta.configure(text=f"{info['id']}  ·  {info['model']}  ·  {info['turns']} turns"
+                                 + (f"  ·  tone: {info['tone']}" if info["tone"] else "")
                                  + ("  ·  read-aloud" if info["read_aloud"] else "")
                                  + ("  ·  interruptions" if info["eagerness"] else ""))
         for name, _, _ in self.personas:

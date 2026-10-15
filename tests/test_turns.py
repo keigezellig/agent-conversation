@@ -458,6 +458,20 @@ def test_the_leader_is_told_it_hosts_and_the_others_who_does():
     assert "talk show host" not in _system_prompt("Mira", "curious", others, "cars")
 
 
+def test_without_a_tone_the_wording_stays_informal_and_simple():
+    others = [("Sol", "skeptical")]
+    plain = _system_prompt("Mira", "curious", others, "cars")
+    assert "Keep your wording informal and very simple." in plain
+    assert "tone" not in plain
+
+
+def test_a_tone_sets_the_wording_in_place_of_the_informal_default():
+    others = [("Sol", "skeptical")]
+    toned = _system_prompt("Mira", "curious", others, "cars", tone="formal and academic")
+    assert "The tone of this discussion is: formal and academic." in toned
+    assert "informal and very simple" not in toned
+
+
 def test_a_leader_who_is_not_in_the_cast_is_refused():
     args = _conversation_args(4)
     args.leader = "Zed"

@@ -100,6 +100,15 @@ anyone else.
 Without `--leader` nothing changes: the first agent listed opens, and whoever's turn comes up last
 closes.
 
+### The tone of the discussion
+
+Pass `--tone TEXT` to set the tone the whole discussion is held in, such as `--tone "formal and
+academic"` or `--tone "a heated late-night debate"`. Every agent is told it, in place of the usual
+instruction to keep the wording informal and very simple; each agent's mood still decides who it is
+within that tone.
+
+Without `--tone` nothing changes: the agents keep their wording informal and very simple.
+
 ### Agents that write in their own language
 
 Say it in the mood and the agent writes in that language:
@@ -366,8 +375,8 @@ Before the conversation starts, the runner synthesizes a word in every voice and
 ## Hold the conversation in a window
 
 The same runner, in a window instead of the terminal. Each conversation is set up in a form there:
-the subject, the cast (name, mood and, optionally, voice per agent, with a tick for the agent who
-hosts, if any), the number of turns, the seed,
+the subject, the tone (empty for the usual informal one), the cast (name, mood and, optionally,
+voice per agent, with a tick for the agent who hosts, if any), the number of turns, the seed,
 and whether the agents may interrupt each other. The model and the voices are not in the form: they
 stay as `.env` and the command line set them, and the form says which model it will use and whether
 read-aloud is on.

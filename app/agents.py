@@ -206,7 +206,7 @@ async def _send_text(socket, text: str, turn: int) -> None:
 def _system_prompt(name: str, mood: str, others: list[tuple[str, str]], subject: str, read_aloud: bool = False,
                    addressed_by: str | None = None, closing: bool = False, brief: bool = False,
                    interrupting: str | None = None, cut_off_by: str | None = None,
-                   language: str | None = None, leader: str | None = None) -> str:
+                   language: str | None = None, leader: str | None = None, tone: str | None = None) -> str:
     people = ", ".join(f"{other} ({other_mood})" for other, other_mood in others)
     prompt = (
         f"You are {name}, one of several AI agents having a natural group conversation. "
@@ -215,8 +215,12 @@ def _system_prompt(name: str, mood: str, others: list[tuple[str, str]], subject:
         "Respond to what the group has said and add a thought of your own. Usually you speak to the whole group; "
         "if you want one particular person to answer, call on them by name. "
         "Write only what you say, without a name label in front. "
-        "Do not repeat points just to fill space. Keep your wording informal and very simple."
+        "Do not repeat points just to fill space."
     )
+    if tone:
+        prompt += f" The tone of this discussion is: {tone}. Keep your wording in that tone."
+    else:
+        prompt += " Keep your wording informal and very simple."
     if leader == name:
         prompt += (" You are a talk show host leading this discussion: you open it, keep it moving by "
                    "bringing the others in, and close it.")
@@ -493,6 +497,7 @@ async def run_conversation(args: argparse.Namespace, show=None, on_start=None) -
         on_start({
             "id": room["id"],
             "subject": args.subject,
+            "tone": args.tone,
             "model": args.model,
             "personas": personas,
             "languages": languages,
@@ -500,7 +505,8 @@ async def run_conversation(args: argparse.Namespace, show=None, on_start=None) -
             "turns": args.turns,
             "read_aloud": speaker is not None,
         })
-    show(f"Conversation {room['id']} | Subject: {args.subject}")
+    show(f"Conversation {room['id']} | Subject: {args.subject}"
+         + (f" | Tone: {args.tone}" if args.tone else ""))
     async with AsyncExitStack() as stack:
         sockets = {}
         for name in names:
@@ -528,7 +534,7 @@ async def run_conversation(args: argparse.Namespace, show=None, on_start=None) -
                 args.llm_api_key,
                 _system_prompt(
                     name, mood, others, args.subject, args.read_aloud, addressed_by, closing, brief,
-                    interrupting, cut_off_by, languages.get(name), args.leader,
+                    interrupting, cut_off_by, languages.get(name), args.leader, args.tone,
                 ),
                 list(history),
                 args.llm_max_tokens,
@@ -562,6 +568,9 @@ def parse_args(argv=None, need_conversation: bool = True) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, help="Seed for picking who speaks next when nobody is called on")
     parser.add_argument("--leader", metavar="NAME",
                         help="Make this agent the talk show host, who opens and closes the conversation")
+    parser.add_argument("--tone",
+                        help="The tone of the discussion, such as \"formal and academic\" or \"a heated "
+                             "debate\" (default: informal and very simple)")
     parser.add_argument("--interruptions", action="store_true",
                         help="Let the agents cut each other off mid-sentence, the pushier moods more often")
     parser.add_argument("--bridge-url", default=os.getenv("AGENT_BRIDGE_URL", "http://localhost:8080"))
@@ -591,16 +600,18 @@ def parse_args(argv=None, need_conversation: bool = True) -> argparse.Namespace:
     defaults = API_DEFAULTS[args.llm_api]
     args.llm_base_url = args.llm_base_url or defaults["base_url"]
     args.model = args.model or defaults["model"]
+    args.tone = (args.tone or "").strip() or None
     return args
 
 
 def conversation_args(base: argparse.Namespace, subject: str, cast, turns: str, seed: str,
-                      interruptions: bool, leader: str = "") -> argparse.Namespace:
+                      interruptions: bool, leader: str = "", tone: str = "") -> argparse.Namespace:
     """The settings for one conversation set up in the window, over the run's own in `base`.
 
     `cast` is a (name, mood, voice) row per persona as typed, voice "" for one from the pool; a row
-    left wholly empty is skipped, and `leader` is the name of the talk show host, "" for none. The model and the voices are not asked for here: they stay as the
-    command line set them. Raises ValueError saying what to fix.
+    left wholly empty is skipped, and `leader` is the name of the talk show host, "" for none. `tone` is
+    the tone of the discussion, "" for the usual informal one. The model and the voices are not asked
+    for here: they stay as the command line set them. Raises ValueError saying what to fix.
     """
     subject = subject.strip()
     if not subject:
@@ -636,7 +647,7 @@ def conversation_args(base: argparse.Namespace, subject: str, cast, turns: str, 
         raise ValueError("the seed must be a whole number, or left empty") from None
     return argparse.Namespace(**{**vars(base), "subject": subject, "agent_specs": specs,
                                  "turns": turns, "seed": seed, "interruptions": interruptions,
-                                 "leader": leader})
+                                 "leader": leader, "tone": tone.strip() or None})
 
 
 def main() -> None:

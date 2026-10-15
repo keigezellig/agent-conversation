@@ -36,6 +36,10 @@ _Avoid_: Round, slot
 The **Persona** appointed talk show host for a **Conversation**: told it hosts, it opens the **Conversation** and closes it. At most one per **Conversation**, and none unless asked for on a given run.
 _Avoid_: Moderator, chair, host (as a domain term)
 
+**Tone**:
+The register a whole **Conversation** is held in ("formal and academic", "a heated debate"), told to every **Persona** alike. Without one, every **Persona** keeps its wording informal and very simple; none unless asked for on a given run.
+_Avoid_: Style, register, atmosphere
+
 **Addressee**:
 The **Persona** a **Reply** hands the floor to by calling on them by name ("Sol, …" or "…, Dave?"), as opposed to merely mentioning them ("what Mira said") or acknowledging them before moving on ("Great point, Mira. Anyway, …"). A call hands over the floor when it is a question or only questions follow it. When a **Reply** calls on several, the last one called on is the addressee. The addressee takes the next **Turn**.
 _Avoid_: Target, recipient (the bridge's per-delivery `to` is a different thing)
@@ -76,6 +80,7 @@ _Avoid_: GUI, dashboard, viewer
 - An **Interruption** overrules both: the **Persona** who cut in takes the next **Turn**, and nobody the cut-off **Reply** called on gets it, not even an **Addressee** named in the part that was still heard
 - Each **Persona** knows the other **Personas**' names and moods, and may call on one of them, but usually speaks to the group
 - A mood is binding, not decoration: whatever it names, the **Persona** follows
+- A **Tone** belongs to the **Conversation** and a mood to one **Persona**: the **Tone** sets how everyone words their **Replies**, and the mood who each one is within it
 - A **Persona** with a **Language** writes every **Reply** in it, whatever language the others are using, and never adds a translation — left to the mood alone it drifts into the language of the **Replies** it reads, since everything it is given to read is in that language
 - A **Language** is read once at the start of a run, by asking the model which language each mood names, and each **Turn** is then told its **Language** outright as its last instruction; if the answer cannot be read, no **Persona** has a **Language** and the mood carries it alone
 - A **Language** is about what a **Persona** writes and a **Voice** about how it sounds: they are set separately and can disagree, so a **Persona** writing Serbian in an English-sounding **Voice** is a mistake the **Runner** does not correct
@@ -100,7 +105,7 @@ _Avoid_: GUI, dashboard, viewer
 - **Read-aloud** belongs to the **Runner**, not the bridge; the bridge has no notion of listeners or audio
 - The **Runner** hands every line it produces to one presenter, the terminal or a **Window**; which one is listening changes nothing about the **Conversation**
 - A **Window** shows one **Conversation** per tab, and starts another only once the current one has closed, so two runs never speak over each other
-- A **Window** sets up what is particular to a **Conversation** — its subject, its **Personas** (each with an optional **Voice**), its **Turns**, the seed and whether **Interruptions** are allowed — and takes the model and the **Read-aloud** settings from the command line, unchanged for the whole run
+- A **Window** sets up what is particular to a **Conversation** — its subject, its **Tone**, its **Personas** (each with an optional **Voice**), its **Turns**, the seed and whether **Interruptions** are allowed — and takes the model and the **Read-aloud** settings from the command line, unchanged for the whole run
 - A **Window** reads a **Reply**'s **Persona** from the label the **Runner** shows it under, so what it attributes is exactly what was shown
 - A stopped **Conversation** ends at once, the **Reply** being spoken included: it breaks off rather than playing out, and nothing the run says after the stop is shown
 - With **Read-aloud**, the **Persona** lit in a **Window** is the one being heard, since a **Reply** is shown at the moment it starts being spoken

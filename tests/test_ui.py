@@ -62,6 +62,18 @@ def test_the_form_may_appoint_a_leader_or_none():
     assert set_up().leader is None
 
 
+def test_the_form_may_set_a_tone_or_leave_it_out():
+    assert set_up(tone="  a heated debate \n").tone == "a heated debate"
+    assert set_up().tone is None
+    assert set_up(tone="   ").tone is None
+
+
+def test_the_tone_is_optional_on_the_command_line():
+    assert parse_args(["--subject", "cars"]).tone is None
+    assert parse_args(["--subject", "cars", "--tone", "formal"]).tone == "formal"
+    assert parse_args(["--subject", "cars", "--tone", "  "]).tone is None
+
+
 def test_an_empty_row_in_the_cast_is_skipped_and_the_fields_are_trimmed():
     args = set_up(subject="  Cars \n", cast=[(" Mira ", "curious ", " "), ("", "", ""), *TWO[1:]], seed=" 7 ")
     assert args.subject == "Cars"
